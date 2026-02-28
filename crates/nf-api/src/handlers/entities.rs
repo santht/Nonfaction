@@ -211,12 +211,7 @@ pub async fn create_entity(
     State(state): State<AppState>,
     Json(entity): Json<Entity>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    // Validate: entity must have at least one source
-    if entity.sources().source_count() == 0 {
-        return Err(ApiError::BadRequest(
-            "entity must have at least one source reference".to_string(),
-        ));
-    }
+    validate_entity_for_creation(&entity)?;
 
     let id = state.entity_repo.insert(&entity).await?;
 
@@ -227,6 +222,59 @@ pub async fn create_entity(
             "entity_type": entity.type_name(),
         })),
     ))
+}
+
+fn validate_entity_for_creation(entity: &Entity) -> ApiResult<()> {
+    // Validate: entity must have at least one source.
+    if entity.sources().source_count() == 0 {
+        return Err(ApiError::BadRequest(
+            "entity must have at least one source reference".to_string(),
+        ));
+    }
+
+    // Validate: entity names are not blank for name-bearing entity types.
+    match entity {
+        Entity::Person(p) if p.name.trim().is_empty() => {
+            return Err(ApiError::BadRequest(
+                "entity name must not be empty".to_string(),
+            ));
+        }
+        Entity::Organization(o) if o.name.trim().is_empty() => {
+            return Err(ApiError::BadRequest(
+                "entity name must not be empty".to_string(),
+            ));
+        }
+        _ => {}
+    }
+
+    // Validate: source URLs must be http(s) URLs with a host.
+    let sources = entity.sources();
+    validate_source_url(&sources.primary.source_url)?;
+    if let Some(archive_url) = &sources.primary.archive_url {
+        validate_source_url(archive_url)?;
+    }
+
+    for source in &sources.supporting {
+        validate_source_url(&source.source_url)?;
+        if let Some(archive_url) = &source.archive_url {
+            validate_source_url(archive_url)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_source_url(url: &url::Url) -> ApiResult<()> {
+    let is_http = matches!(url.scheme(), "http" | "https");
+    let has_host = url.host_str().is_some();
+
+    if !is_http || !has_host {
+        return Err(ApiError::BadRequest(
+            "source URL must be a valid http(s) URL".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 // ─── Create relationship ────────────────────────────────────────────────────
@@ -279,7 +327,7 @@ pub async fn create_relationship(
 mod tests {
     use super::*;
     use nf_core::{
-        entities::{Entity, Person},
+        entities::{Entity, Organization, OrganizationType, Person},
         source::{ContentHash, SourceChain, SourceRef, SourceType},
     };
     use url::Url;
@@ -344,5 +392,37 @@ mod tests {
         let entity = Entity::Person(person);
         let sources_chain = entity.sources();
         assert_eq!(sources_chain.source_count(), 1);
+    }
+
+    #[test]
+    fn test_validate_entity_for_creation_rejects_blank_person_name() {
+        let person = Person::new("   ", test_source_chain());
+        let entity = Entity::Person(person);
+        assert!(validate_entity_for_creation(&entity).is_err());
+    }
+
+    #[test]
+    fn test_validate_entity_for_creation_rejects_blank_org_name() {
+        let org = Organization::new("   ", OrganizationType::Other, test_source_chain());
+        let entity = Entity::Organization(org);
+        assert!(validate_entity_for_creation(&entity).is_err());
+    }
+
+    #[test]
+    fn test_validate_entity_for_creation_rejects_non_http_source_url() {
+        let source = SourceRef::new(
+            Url::parse("file:///tmp/source.txt").unwrap(),
+            ContentHash::compute(b"test"),
+            SourceType::OtherGovernment,
+            "test",
+        );
+        let entity = Entity::Person(Person::new("Valid Name", SourceChain::new(source)));
+        assert!(validate_entity_for_creation(&entity).is_err());
+    }
+
+    #[test]
+    fn test_validate_entity_for_creation_accepts_valid_person() {
+        let entity = Entity::Person(Person::new("Valid Name", test_source_chain()));
+        assert!(validate_entity_for_creation(&entity).is_ok());
     }
 }

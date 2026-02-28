@@ -37,11 +37,7 @@ pub async fn export_story_package(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Response> {
     // 1. Fetch the root entity.
-    let entity = state
-        .entity_repo
-        .get(id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("entity {id}")))?;
+    let entity = require_entity(state.entity_repo.get(id).await?, id)?;
 
     // 2. Fetch all relationships.
     let outgoing = state.relationship_repo.list_from(id, 0, 500).await?.items;
@@ -166,6 +162,10 @@ pub async fn export_story_package(
         Bytes::from(zip_bytes),
     )
         .into_response())
+}
+
+fn require_entity(entity: Option<Entity>, id: Uuid) -> ApiResult<Entity> {
+    entity.ok_or_else(|| ApiError::NotFound(format!("entity {id}")))
 }
 
 // ─── ZIP builder ─────────────────────────────────────────────────────────────
@@ -341,5 +341,15 @@ mod tests {
         assert!(names.contains(&"timeline.json".to_string()));
         assert!(names.contains(&"graph.json".to_string()));
         assert!(names.contains(&"README.txt".to_string()));
+    }
+
+    #[test]
+    fn test_require_entity_not_found() {
+        let id = Uuid::new_v4();
+        let err = require_entity(None, id).unwrap_err();
+        match err {
+            ApiError::NotFound(msg) => assert!(msg.contains(&id.to_string())),
+            _ => panic!("expected not found error"),
+        }
     }
 }

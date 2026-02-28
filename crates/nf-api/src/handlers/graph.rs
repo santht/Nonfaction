@@ -11,6 +11,7 @@ use nf_core::relationships::Relationship;
 use nf_store::repository::Repository;
 
 use crate::error::{ApiError, ApiResult};
+use crate::pagination::Pagination;
 use crate::state::AppState;
 
 // ─── Cytoscape.js compatible types ───────────────────────────────────────────
@@ -46,6 +47,10 @@ pub struct CytoEdgeData {
 /// Full Cytoscape.js compatible graph payload.
 #[derive(Debug, Serialize)]
 pub struct CytoGraph {
+    pub page: u32,
+    pub per_page: u32,
+    pub total_nodes: usize,
+    pub total_edges: usize,
     pub nodes: Vec<CytoNode>,
     pub edges: Vec<CytoEdge>,
 }
@@ -57,6 +62,8 @@ pub struct NetworkQuery {
     /// How many hops to traverse (default: 2, max: 3 to prevent huge graphs).
     #[serde(default = "default_depth")]
     pub depth: u32,
+    #[serde(flatten)]
+    pub pagination: Pagination,
 }
 
 fn default_depth() -> u32 {
@@ -73,6 +80,9 @@ pub async fn get_network(
     Query(params): Query<NetworkQuery>,
 ) -> ApiResult<Json<CytoGraph>> {
     let depth = params.depth.min(3);
+    let page = params.pagination.page() as usize;
+    let per_page = params.pagination.per_page() as usize;
+    let offset = page * per_page;
 
     // BFS traversal up to `depth` hops.
     let mut visited_entities: HashSet<Uuid> = HashSet::new();
@@ -137,7 +147,19 @@ pub async fn get_network(
         }
     }
 
-    Ok(Json(CytoGraph { nodes, edges }))
+    let total_nodes = nodes.len();
+    let total_edges = edges.len();
+    let nodes = nodes.into_iter().skip(offset).take(per_page).collect();
+    let edges = edges.into_iter().skip(offset).take(per_page).collect();
+
+    Ok(Json(CytoGraph {
+        page: params.pagination.page,
+        per_page: params.pagination.per_page(),
+        total_nodes,
+        total_edges,
+        nodes,
+        edges,
+    }))
 }
 
 // ─── GET /graph/path/:from/:to ────────────────────────────────────────────────
@@ -405,5 +427,32 @@ mod tests {
         );
         let edge = rel_to_cyto_edge(&rel);
         assert_eq!(edge.data.rel_type, "DonatedTo");
+    }
+
+    #[test]
+    fn test_network_query_pagination_defaults() {
+        let query = NetworkQuery {
+            depth: 2,
+            pagination: Pagination {
+                page: 1,
+                per_page: 20,
+            },
+        };
+        assert_eq!(query.depth, 2);
+        assert_eq!(query.pagination.page, 1);
+        assert_eq!(query.pagination.per_page(), 20);
+    }
+
+    #[test]
+    fn test_network_query_pagination_clamped() {
+        let query = NetworkQuery {
+            depth: 1,
+            pagination: Pagination {
+                page: 2,
+                per_page: 500,
+            },
+        };
+        assert_eq!(query.pagination.page, 2);
+        assert_eq!(query.pagination.per_page(), 100);
     }
 }

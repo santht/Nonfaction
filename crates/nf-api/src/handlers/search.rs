@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use nf_search::{SearchOptions, SearchResult};
 
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
 // ─── Search query params ──────────────────────────────────────────────────────
@@ -93,6 +93,8 @@ pub async fn search(
     State(state): State<AppState>,
     Query(params): Query<SearchQuery>,
 ) -> ApiResult<Json<SearchResponse>> {
+    validate_query(&params.query)?;
+
     let page = params.page.saturating_sub(1) as usize; // Convert 1-indexed to 0-indexed
     let per_page = params.per_page.min(100) as usize;
     let offset = page * per_page;
@@ -133,6 +135,16 @@ pub async fn search(
         results,
         facets,
     }))
+}
+
+fn validate_query(query: &str) -> ApiResult<()> {
+    if query.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "query parameter 'q' must not be empty".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -186,5 +198,16 @@ mod tests {
         let per_page: u32 = 10;
         let offset = (page.saturating_sub(1) as usize) * per_page as usize;
         assert_eq!(offset, 20);
+    }
+
+    #[test]
+    fn test_validate_query_rejects_empty() {
+        assert!(validate_query("").is_err());
+        assert!(validate_query("   ").is_err());
+    }
+
+    #[test]
+    fn test_validate_query_accepts_non_empty() {
+        assert!(validate_query("official donations").is_ok());
     }
 }
