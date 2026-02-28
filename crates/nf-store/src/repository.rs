@@ -153,6 +153,49 @@ fn entity_updated_at(entity: &Entity) -> chrono::DateTime<chrono::Utc> {
     }
 }
 
+const ENTITY_UPDATE_SQL: &str =
+    "UPDATE entities SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = $2, updated_at = $3 WHERE id = $4";
+const ENTITY_DELETE_SQL: &str = "DELETE FROM entities WHERE id = $1";
+const RELATIONSHIP_DELETE_SQL: &str = "DELETE FROM relationships WHERE id = $1";
+const ENTITY_COUNT_SQL: &str = "SELECT COUNT(*) FROM entities";
+const RELATIONSHIP_COUNT_SQL: &str = "SELECT COUNT(*) FROM relationships";
+
+fn map_sqlx_write_error(err: sqlx::Error) -> StoreError {
+    match &err {
+        sqlx::Error::Database(db_err) => {
+            if let Some(code) = db_err.code() {
+                let code = code.as_ref();
+                if matches!(code, "23502" | "23503" | "23505" | "23514" | "23P01") {
+                    return StoreError::Integrity(db_err.message().to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+    StoreError::Database(err)
+}
+
+fn entity_date_column(date_field: &str) -> Result<&'static str, StoreError> {
+    match date_field {
+        "created_at" => Ok("created_at"),
+        "updated_at" => Ok("updated_at"),
+        _ => Err(StoreError::Integrity(format!(
+            "Unsupported entity date field: {date_field}"
+        ))),
+    }
+}
+
+fn entity_date_range_count_sql(date_column: &str) -> String {
+    format!("SELECT COUNT(*) FROM entities WHERE {date_column} >= $1 AND {date_column} <= $2")
+}
+
+fn entity_date_range_list_sql(date_column: &str) -> String {
+    format!(
+        "SELECT data FROM entities WHERE {date_column} >= $1 AND {date_column} <= $2 \
+         ORDER BY {date_column} DESC LIMIT $3 OFFSET $4"
+    )
+}
+
 // ─── EntityRepository ────────────────────────────────────────────────────────
 
 /// Repository for all [`Entity`] variants.
@@ -171,6 +214,47 @@ impl EntityRepository {
     /// Access the underlying database pool (e.g. for audit queries).
     pub fn pool(&self) -> DbPool {
         self.pool.clone()
+    }
+
+    /// Count entities without fetching rows.
+    pub async fn count(&self) -> Result<i64, StoreError> {
+        let (total_count,): (i64,) = sqlx::query_as(ENTITY_COUNT_SQL).fetch_one(&self.pool).await?;
+        Ok(total_count)
+    }
+
+    /// List entities filtered by an allowed timestamp column and inclusive range.
+    ///
+    /// Supported `date_field` values are `created_at` and `updated_at`.
+    pub async fn list_by_date_range(
+        &self,
+        date_field: &str,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
+        let date_column = entity_date_column(date_field)?;
+        let limit = page_size as i64;
+        let offset = (page as i64) * limit;
+
+        let count_sql = entity_date_range_count_sql(date_column);
+        let (total_count,): (i64,) = sqlx::query_as(&count_sql)
+            .bind(start)
+            .bind(end)
+            .fetch_one(&self.pool)
+            .await?;
+
+        let list_sql = entity_date_range_list_sql(date_column);
+        let rows = sqlx::query(&list_sql)
+            .bind(start)
+            .bind(end)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let items = deserialize_entity_rows(rows)?;
+        Ok(Page::with_total(items, page, page_size, total_count))
     }
 
     /// List entities filtered by a specific entity type name.
@@ -343,24 +427,24 @@ impl Repository<Entity> for EntityRepository {
         let version = entity_version(entity);
         let updated_at = entity_updated_at(entity);
 
-        let result = sqlx::query(
-            "UPDATE entities SET data = $1, version = $2, updated_at = $3 WHERE id = $4",
-        )
-        .bind(data)
-        .bind(version)
-        .bind(updated_at)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query(ENTITY_UPDATE_SQL)
+            .bind(data)
+            .bind(version)
+            .bind(updated_at)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_write_error)?;
 
         Ok(result.rows_affected() > 0)
     }
 
     async fn delete(&self, id: Uuid) -> Result<bool, StoreError> {
-        let result = sqlx::query("DELETE FROM entities WHERE id = $1")
+        let result = sqlx::query(ENTITY_DELETE_SQL)
             .bind(id)
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(map_sqlx_write_error)?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -369,7 +453,7 @@ impl Repository<Entity> for EntityRepository {
         let limit = page_size as i64;
         let offset = (page as i64) * limit;
 
-        let (total_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM entities")
+        let (total_count,): (i64,) = sqlx::query_as(ENTITY_COUNT_SQL)
             .fetch_one(&self.pool)
             .await?;
 
@@ -395,6 +479,14 @@ pub struct RelationshipRepository {
 impl RelationshipRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
+    }
+
+    /// Count relationships without fetching rows.
+    pub async fn count(&self) -> Result<i64, StoreError> {
+        let (total_count,): (i64,) = sqlx::query_as(RELATIONSHIP_COUNT_SQL)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(total_count)
     }
 
     /// Find all relationships originating from a given entity.
@@ -511,10 +603,11 @@ impl Repository<Relationship> for RelationshipRepository {
     }
 
     async fn delete(&self, id: Uuid) -> Result<bool, StoreError> {
-        let result = sqlx::query("DELETE FROM relationships WHERE id = $1")
+        let result = sqlx::query(RELATIONSHIP_DELETE_SQL)
             .bind(id)
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(map_sqlx_write_error)?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -523,7 +616,7 @@ impl Repository<Relationship> for RelationshipRepository {
         let limit = page_size as i64;
         let offset = (page as i64) * limit;
 
-        let (total_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM relationships")
+        let (total_count,): (i64,) = sqlx::query_as(RELATIONSHIP_COUNT_SQL)
             .fetch_one(&self.pool)
             .await?;
 
@@ -634,6 +727,65 @@ mod tests {
         let json = serde_json::to_value(&rel).unwrap();
         let recovered: Relationship = serde_json::from_value(json).unwrap();
         assert_eq!(recovered.id.0, rel.id.0);
+    }
+
+    #[test]
+    fn test_entity_update_sql_uses_jsonb_merge() {
+        assert!(ENTITY_UPDATE_SQL.contains("COALESCE(data, '{}'::jsonb) || $1::jsonb"));
+    }
+
+    #[test]
+    fn test_entity_delete_sql() {
+        assert_eq!(ENTITY_DELETE_SQL, "DELETE FROM entities WHERE id = $1");
+    }
+
+    #[test]
+    fn test_relationship_delete_sql() {
+        assert_eq!(
+            RELATIONSHIP_DELETE_SQL,
+            "DELETE FROM relationships WHERE id = $1"
+        );
+    }
+
+    #[test]
+    fn test_entity_count_sql() {
+        assert_eq!(ENTITY_COUNT_SQL, "SELECT COUNT(*) FROM entities");
+    }
+
+    #[test]
+    fn test_relationship_count_sql() {
+        assert_eq!(RELATIONSHIP_COUNT_SQL, "SELECT COUNT(*) FROM relationships");
+    }
+
+    #[test]
+    fn test_entity_date_column_allowed_values() {
+        assert_eq!(entity_date_column("created_at").unwrap(), "created_at");
+        assert_eq!(entity_date_column("updated_at").unwrap(), "updated_at");
+    }
+
+    #[test]
+    fn test_entity_date_column_rejects_unknown_value() {
+        let err = entity_date_column("pardon_date").unwrap_err();
+        assert!(matches!(err, StoreError::Integrity(_)));
+    }
+
+    #[test]
+    fn test_entity_date_range_count_sql_generation() {
+        let sql = entity_date_range_count_sql("created_at");
+        assert_eq!(
+            sql,
+            "SELECT COUNT(*) FROM entities WHERE created_at >= $1 AND created_at <= $2"
+        );
+    }
+
+    #[test]
+    fn test_entity_date_range_list_sql_generation() {
+        let sql = entity_date_range_list_sql("updated_at");
+        assert_eq!(
+            sql,
+            "SELECT data FROM entities WHERE updated_at >= $1 AND updated_at <= $2 \
+             ORDER BY updated_at DESC LIMIT $3 OFFSET $4"
+        );
     }
 
     // ── DB-dependent tests ────────────────────────────────────────────────────
