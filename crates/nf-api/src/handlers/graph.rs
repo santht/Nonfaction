@@ -350,6 +350,7 @@ fn entity_label(entity: &Entity) -> String {
         Entity::ConductComparison(c) => c.official_action.clone(),
         Entity::PublicStatement(s) => s.content_summary.clone(),
         Entity::PolicyDecision(p) => p.description.clone(),
+        Entity::LobbyingActivity(la) => format!("{} for {}", la.registrant_name, la.client_name),
     }
 }
 

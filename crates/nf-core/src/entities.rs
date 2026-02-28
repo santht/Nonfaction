@@ -385,6 +385,50 @@ pub enum VotePosition {
     NotVoting,
 }
 
+/// A lobbying activity — a registered lobbying engagement from LDA/FARA disclosures
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LobbyingActivity {
+    pub meta: EntityMeta,
+    /// Name of the lobbying registrant (firm or individual)
+    pub registrant_name: String,
+    /// Name of the client on whose behalf lobbying was performed
+    pub client_name: String,
+    /// Issue area / subject matter (e.g., "Taxation", "Defense")
+    pub issue_area: String,
+    /// Reported lobbying expenditure in USD
+    pub amount: f64,
+    /// Date the filing was submitted
+    pub filing_date: NaiveDate,
+    /// Source provenance chain
+    pub source_chain: SourceChain,
+}
+
+impl LobbyingActivity {
+    pub fn new(
+        registrant_name: impl Into<String>,
+        client_name: impl Into<String>,
+        issue_area: impl Into<String>,
+        amount: f64,
+        filing_date: NaiveDate,
+        sources: SourceChain,
+    ) -> Self {
+        let source_chain = sources.clone();
+        Self {
+            meta: EntityMeta::new(sources),
+            registrant_name: registrant_name.into(),
+            client_name: client_name.into(),
+            issue_area: issue_area.into(),
+            amount,
+            filing_date,
+            source_chain,
+        }
+    }
+
+    pub fn type_name() -> &'static str {
+        "LobbyingActivity"
+    }
+}
+
 /// The top-level enum wrapping all entity types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Entity {
@@ -399,6 +443,7 @@ pub enum Entity {
     ConductComparison(ConductComparison),
     PublicStatement(PublicStatement),
     PolicyDecision(PolicyDecision),
+    LobbyingActivity(LobbyingActivity),
 }
 
 impl Entity {
@@ -415,6 +460,7 @@ impl Entity {
             Self::ConductComparison(e) => e.meta.id,
             Self::PublicStatement(e) => e.meta.id,
             Self::PolicyDecision(e) => e.meta.id,
+            Self::LobbyingActivity(e) => e.meta.id,
         }
     }
 
@@ -431,6 +477,7 @@ impl Entity {
             Self::ConductComparison(e) => &e.meta.sources,
             Self::PublicStatement(e) => &e.meta.sources,
             Self::PolicyDecision(e) => &e.meta.sources,
+            Self::LobbyingActivity(e) => &e.meta.sources,
         }
     }
 
@@ -447,6 +494,7 @@ impl Entity {
             Self::ConductComparison(_) => "ConductComparison",
             Self::PublicStatement(_) => "PublicStatement",
             Self::PolicyDecision(_) => "PolicyDecision",
+            Self::LobbyingActivity(_) => "LobbyingActivity",
         }
     }
 }
@@ -621,7 +669,10 @@ mod tests {
         assert_eq!(org.name, "Accountability PAC");
         assert_eq!(org.aliases, vec!["APAC"]);
         assert_eq!(org.org_type, OrganizationType::SuperPac);
-        assert_eq!(org.jurisdiction, Some(Jurisdiction::State("NY".to_string())));
+        assert_eq!(
+            org.jurisdiction,
+            Some(Jurisdiction::State("NY".to_string()))
+        );
         assert_eq!(org.known_principals, vec![known]);
         assert!(org.foreign_connection);
 
@@ -806,7 +857,10 @@ mod tests {
         assert_eq!(correlation.event_a, a);
         assert_eq!(correlation.event_b, b);
         assert_eq!(correlation.days_between, 31);
-        assert_eq!(correlation.correlation_type, CorrelationType::DonationToVote);
+        assert_eq!(
+            correlation.correlation_type,
+            CorrelationType::DonationToVote
+        );
         assert!(correlation.auto_flagged);
         assert_eq!(correlation.threshold_days, Some(90));
 
@@ -830,7 +884,10 @@ mod tests {
         };
 
         assert_eq!(comparison.official, official);
-        assert_eq!(comparison.official_action, "Awarded contract after donation");
+        assert_eq!(
+            comparison.official_action,
+            "Awarded contract after donation"
+        );
         assert_eq!(comparison.action_source, "Contract records");
         assert_eq!(comparison.equivalent_private_conduct, "Kickback");
         assert_eq!(comparison.documented_consequence, "Prosecution");
@@ -894,5 +951,83 @@ mod tests {
         let id = decision.meta.id;
         let entity = Entity::PolicyDecision(decision);
         assert_entity_common(&entity, "PolicyDecision", id);
+    }
+
+    #[test]
+    fn test_lobbying_activity_constructor() {
+        let sources = test_source_chain();
+        let filing_date = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
+        let activity = LobbyingActivity::new(
+            "Acme Lobbying LLC",
+            "Big Defense Corp",
+            "Defense",
+            250_000.0,
+            filing_date,
+            sources,
+        );
+
+        assert_eq!(activity.registrant_name, "Acme Lobbying LLC");
+        assert_eq!(activity.client_name, "Big Defense Corp");
+        assert_eq!(activity.issue_area, "Defense");
+        assert_eq!(activity.amount, 250_000.0);
+        assert_eq!(activity.filing_date, filing_date);
+        assert_eq!(activity.meta.sources.source_count(), 1);
+        assert_eq!(activity.source_chain.source_count(), 1);
+        assert_eq!(activity.meta.version, 1);
+    }
+
+    #[test]
+    fn test_lobbying_activity_type_name_static() {
+        assert_eq!(LobbyingActivity::type_name(), "LobbyingActivity");
+    }
+
+    #[test]
+    fn test_entity_lobbying_activity_variant() {
+        let sources = test_source_chain();
+        let filing_date = NaiveDate::from_ymd_opt(2025, 1, 10).unwrap();
+        let activity = LobbyingActivity::new(
+            "Policy Partners Inc",
+            "PharmaCo",
+            "Healthcare",
+            500_000.0,
+            filing_date,
+            sources,
+        );
+        let id = activity.meta.id;
+        let entity = Entity::LobbyingActivity(activity);
+        assert_entity_common(&entity, "LobbyingActivity", id);
+    }
+
+    #[test]
+    fn test_lobbying_activity_source_chain_is_cloned() {
+        let sources = test_source_chain();
+        let filing_date = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        let activity = LobbyingActivity::new(
+            "Firm A",
+            "Client B",
+            "Taxation",
+            100_000.0,
+            filing_date,
+            sources,
+        );
+        // Both meta.sources and source_chain should reflect the same primary source count
+        assert_eq!(
+            activity.meta.sources.source_count(),
+            activity.source_chain.source_count()
+        );
+    }
+
+    #[test]
+    fn test_lobbying_activity_zero_amount() {
+        let filing_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let activity = LobbyingActivity::new(
+            "Pro Bono Lobby",
+            "Nonprofit",
+            "Environment",
+            0.0,
+            filing_date,
+            test_source_chain(),
+        );
+        assert_eq!(activity.amount, 0.0);
     }
 }

@@ -125,6 +125,39 @@ fn parse_date(s: Option<&str>) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
 }
 
+// ── Bill detail response shape ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CongressBillDetailResponse {
+    bill: CongressBillDetailRaw,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CongressBillDetailRaw {
+    number: Option<String>,
+    title: Option<String>,
+    congress: Option<u32>,
+    #[serde(rename = "type")]
+    bill_type: Option<String>,
+    introduced_date: Option<String>,
+    latest_action: Option<LatestAction>,
+    policy_area: Option<PolicyArea>,
+}
+
+/// Parsed details from the Congress.gov bill detail endpoint.
+#[derive(Debug, Clone)]
+pub struct BillDetail {
+    pub title: String,
+    pub congress: u32,
+    pub bill_type: String,
+    pub bill_number: String,
+    pub introduced_date: Option<NaiveDate>,
+    pub latest_action_text: Option<String>,
+    pub policy_area: Option<String>,
+}
+
 // ── Congress scraper ──────────────────────────────────────────────────────────
 
 pub struct CongressScraper {
@@ -142,6 +175,50 @@ impl CongressScraper {
 
     fn api_key(&self) -> &str {
         &self.config.api_key
+    }
+
+    // ── Bill detail ───────────────────────────────────────────────────────────
+
+    /// Fetch a single bill from Congress.gov by congress number, type, and bill number.
+    ///
+    /// Calls `GET /v3/bill/{congress}/{bill_type}/{bill_number}` and returns
+    /// the parsed title, dates, latest action, and policy area.
+    pub async fn fetch_bill(
+        &self,
+        runtime: &ScraperRuntime,
+        congress: u32,
+        bill_type: &str,
+        bill_number: u32,
+    ) -> ScrapeResult<Option<BillDetail>> {
+        let url = Url::parse_with_params(
+            &format!(
+                "{}/bill/{}/{}/{}",
+                self.base_url(),
+                congress,
+                bill_type,
+                bill_number
+            ),
+            &[("api_key", self.api_key()), ("format", "json")],
+        )
+        .map_err(ScrapeError::UrlParse)?;
+
+        let Some(json) = self.fetch_json(runtime, &url).await? else {
+            return Ok(None);
+        };
+
+        let resp: CongressBillDetailResponse =
+            serde_json::from_value(json).map_err(ScrapeError::Json)?;
+        let raw = resp.bill;
+
+        Ok(Some(BillDetail {
+            title: raw.title.unwrap_or_default(),
+            congress: raw.congress.unwrap_or(congress),
+            bill_type: raw.bill_type.unwrap_or_else(|| bill_type.to_string()),
+            bill_number: raw.number.unwrap_or_else(|| bill_number.to_string()),
+            introduced_date: parse_date(raw.introduced_date.as_deref()),
+            latest_action_text: raw.latest_action.and_then(|a| a.text),
+            policy_area: raw.policy_area.and_then(|p| p.name),
+        }))
     }
 
     // ── Members ───────────────────────────────────────────────────────────────
@@ -538,5 +615,166 @@ mod tests {
         let runtime = ScraperRuntime::new_unlimited();
         let result = scraper.scrape_all(&runtime).await;
         assert!(result.is_ok());
+    }
+
+    // ── fetch_bill tests ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_fetch_bill_parses_detail() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/bill/118/hr/1234"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "bill": {
+                    "number": "1234",
+                    "title": "Open Government Act",
+                    "congress": 118,
+                    "type": "HR",
+                    "introducedDate": "2023-03-01",
+                    "latestAction": {
+                        "actionDate": "2023-06-15",
+                        "text": "Passed House"
+                    },
+                    "policyArea": {"name": "Government Operations and Politics"}
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let config = make_config(server.uri());
+        let scraper = CongressScraper::new(config);
+        let runtime = ScraperRuntime::new_unlimited();
+
+        let detail = scraper
+            .fetch_bill(&runtime, 118, "hr", 1234)
+            .await
+            .unwrap()
+            .expect("expected a bill detail");
+
+        assert_eq!(detail.title, "Open Government Act");
+        assert_eq!(detail.congress, 118);
+        assert_eq!(detail.bill_type, "HR");
+        assert_eq!(detail.bill_number, "1234");
+        assert_eq!(
+            detail.introduced_date,
+            chrono::NaiveDate::from_ymd_opt(2023, 3, 1)
+        );
+        assert_eq!(
+            detail.latest_action_text.as_deref(),
+            Some("Passed House")
+        );
+        assert_eq!(
+            detail.policy_area.as_deref(),
+            Some("Government Operations and Politics")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_bill_no_latest_action() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/bill/118/s/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "bill": {
+                    "number": "42",
+                    "title": "Simple Senate Bill",
+                    "congress": 118,
+                    "type": "S",
+                    "introducedDate": "2023-01-10",
+                    "latestAction": null,
+                    "policyArea": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let config = make_config(server.uri());
+        let scraper = CongressScraper::new(config);
+        let runtime = ScraperRuntime::new_unlimited();
+
+        let detail = scraper
+            .fetch_bill(&runtime, 118, "s", 42)
+            .await
+            .unwrap()
+            .expect("expected a bill detail");
+
+        assert_eq!(detail.title, "Simple Senate Bill");
+        assert!(detail.latest_action_text.is_none());
+        assert!(detail.policy_area.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_bill_url_contains_correct_path_segments() {
+        let server = MockServer::start().await;
+
+        // Use path_regex or a specific path to verify URL construction
+        Mock::given(method("GET"))
+            .and(path("/bill/117/hjres/55"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "bill": {
+                    "number": "55",
+                    "title": "Joint Resolution Example",
+                    "congress": 117,
+                    "type": "HJRES",
+                    "introducedDate": "2021-05-01",
+                    "latestAction": null,
+                    "policyArea": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let config = make_config(server.uri());
+        let scraper = CongressScraper::new(config);
+        let runtime = ScraperRuntime::new_unlimited();
+
+        let detail = scraper
+            .fetch_bill(&runtime, 117, "hjres", 55)
+            .await
+            .unwrap()
+            .expect("expected a bill detail");
+
+        assert_eq!(detail.congress, 117);
+        assert_eq!(detail.bill_number, "55");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_bill_falls_back_to_defaults_when_fields_missing() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/bill/118/hr/999"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "bill": {
+                    "number": null,
+                    "title": null,
+                    "congress": null,
+                    "type": null,
+                    "introducedDate": null,
+                    "latestAction": null,
+                    "policyArea": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let config = make_config(server.uri());
+        let scraper = CongressScraper::new(config);
+        let runtime = ScraperRuntime::new_unlimited();
+
+        let detail = scraper
+            .fetch_bill(&runtime, 118, "hr", 999)
+            .await
+            .unwrap()
+            .expect("expected a bill detail even with null fields");
+
+        // Should fall back to the caller-supplied values
+        assert_eq!(detail.congress, 118);
+        assert_eq!(detail.bill_type, "hr");
+        assert_eq!(detail.bill_number, "999");
+        assert!(detail.title.is_empty());
+        assert!(detail.introduced_date.is_none());
     }
 }

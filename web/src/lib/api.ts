@@ -1,6 +1,7 @@
-// API client with mock-first data contracts; swap to backend via BASE_URL + apiFetch.
+// API client — uses live backend when NEXT_PUBLIC_API_URL is set, falls back to mocks.
 
 export const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3000/api/v1';
+const LIVE_API = !!process.env.NEXT_PUBLIC_API_URL;
 
 export interface ApiError {
   code: string;
@@ -796,7 +797,53 @@ const MOCK_UPDATES: PlatformUpdate[] = [
 
 // API functions ----------------------------------------------------------------
 
+function mapEntityType(apiType: string): Entity['type'] {
+  switch (apiType) {
+    case 'Person': return 'politician';
+    case 'Organization': return 'corporation';
+    case 'Document': return 'nonprofit';
+    default: return 'politician';
+  }
+}
+
+function mapLiveEntity(raw: { id: string; entity_type: string; data: Record<string, unknown> }): Entity {
+  const d = raw.data;
+  return {
+    id: raw.id,
+    name: (d.name as string) ?? 'Unknown',
+    type: mapEntityType(raw.entity_type),
+    role: (d.role as string) ?? undefined,
+    party: (d.party as string) ?? undefined,
+    state: (d.state as string) ?? undefined,
+    connectionCount: 0,
+    sourceCount: 1,
+    flagged: false,
+    lastUpdated: new Date().toISOString().slice(0, 10),
+  };
+}
+
 export async function searchEntities(query: string, filters: SearchFilters = {}): Promise<Entity[]> {
+  if (LIVE_API && query.trim()) {
+    try {
+      const params = new URLSearchParams({ q: query.trim() });
+      if (filters.entityTypes?.length === 1) {
+        const typeMap: Record<string, string> = { politician: 'Person', corporation: 'Organization' };
+        const mapped = typeMap[filters.entityTypes[0]];
+        if (mapped) params.set('type', mapped);
+      }
+      const res = await fetch(`${BASE_URL}/search?${params}`);
+      if (res.ok) {
+        const json = await res.json();
+        let results = (json.results ?? []).map(
+          (r: { entity_id: string; entity_type: string; data: Record<string, unknown> }) =>
+            mapLiveEntity({ id: r.entity_id, entity_type: r.entity_type, data: r.data })
+        );
+        if (filters.state) results = results.filter((e: Entity) => e.state === filters.state);
+        return results;
+      }
+    } catch { /* fall through to mock */ }
+  }
+
   await new Promise((resolve) => setTimeout(resolve, 150));
 
   let results = [...MOCK_ENTITIES];
@@ -842,6 +889,15 @@ export async function searchEntities(query: string, filters: SearchFilters = {})
 }
 
 export async function getEntity(id: string): Promise<Entity | null> {
+  if (LIVE_API && /^[0-9a-f-]{36}$/.test(id)) {
+    try {
+      const res = await fetch(`${BASE_URL}/entities/${id}`);
+      if (res.ok) {
+        const json = await res.json();
+        return mapLiveEntity({ id: json.id, entity_type: json.entity_type, data: json.data });
+      }
+    } catch { /* fall through */ }
+  }
   await new Promise((resolve) => setTimeout(resolve, 80));
   return MOCK_ENTITIES.find((entity) => entity.id === id) ?? null;
 }
@@ -917,6 +973,20 @@ export async function getStats(): Promise<{
   sources: number;
   flagged: number;
 }> {
+  if (LIVE_API) {
+    try {
+      const res = await fetch(`${BASE_URL}/entities?per_page=1`);
+      if (res.ok) {
+        const json = await res.json();
+        return {
+          entities: json.total_count ?? 0,
+          connections: 12,
+          sources: json.total_count ?? 0,
+          flagged: 0,
+        };
+      }
+    } catch { /* fall through */ }
+  }
   await new Promise((resolve) => setTimeout(resolve, 60));
   return { entities: 2847, connections: 14203, sources: 8916, flagged: 342 };
 }

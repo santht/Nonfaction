@@ -128,6 +128,24 @@ fn filing_id_from_value(v: Option<&serde_json::Value>) -> Option<String> {
         .or_else(|| v?.as_str().map(|s| s.to_string()))
 }
 
+// ── Committee detail response shape ───────────────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct FecCommitteeDetailRaw {
+    name: Option<String>,
+    treasurer_name: Option<String>,
+    filing_frequency: Option<String>,
+}
+
+/// Parsed details from the FEC committee detail endpoint.
+#[derive(Debug, Clone)]
+pub struct CommitteeDetail {
+    pub name: String,
+    pub treasurer_name: Option<String>,
+    pub filing_frequency: Option<String>,
+}
+
 // ── FEC scraper ───────────────────────────────────────────────────────────────
 
 pub struct FecScraper {
@@ -145,6 +163,39 @@ impl FecScraper {
 
     fn api_key(&self) -> &str {
         &self.config.api_key
+    }
+
+    // ── Committee detail ──────────────────────────────────────────────────────
+
+    /// Fetch the detail for a single FEC committee by ID.
+    ///
+    /// Calls `GET /v1/committee/{committee_id}/` and returns the parsed
+    /// committee name, treasurer name, and filing frequency.
+    pub async fn fetch_committee(
+        &self,
+        runtime: &ScraperRuntime,
+        committee_id: &str,
+    ) -> ScrapeResult<Option<CommitteeDetail>> {
+        let url = Url::parse_with_params(
+            &format!("{}/committee/{}/", self.base_url(), committee_id),
+            &[("api_key", self.api_key())],
+        )
+        .map_err(ScrapeError::UrlParse)?;
+
+        let Some(json) = self.fetch_json(runtime, &url).await? else {
+            return Ok(None);
+        };
+
+        let page: FecPage<FecCommitteeDetailRaw> =
+            serde_json::from_value(json).map_err(ScrapeError::Json)?;
+
+        let detail = page.results.into_iter().next().map(|r| CommitteeDetail {
+            name: r.name.unwrap_or_default(),
+            treasurer_name: r.treasurer_name,
+            filing_frequency: r.filing_frequency,
+        });
+
+        Ok(detail)
     }
 
     // ── Candidates ────────────────────────────────────────────────────────────
@@ -840,5 +891,100 @@ mod tests {
         let runtime = ScraperRuntime::new_unlimited();
         let entities = scraper.scrape_all(&runtime).await.unwrap();
         assert!(entities.is_empty());
+    }
+
+    // ── fetch_committee tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_fetch_committee_parses_detail() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/committee/C00000001/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    {
+                        "name": "FRIENDS OF DEMOCRACY",
+                        "treasurer_name": "ALICE TREASURER",
+                        "filing_frequency": "Q"
+                    }
+                ],
+                "pagination": {"count": 1, "pages": 1, "page": 1}
+            })))
+            .mount(&server)
+            .await;
+
+        let config = make_config(server.uri());
+        let scraper = FecScraper::new(config);
+        let runtime = ScraperRuntime::new_unlimited();
+
+        let detail = scraper
+            .fetch_committee(&runtime, "C00000001")
+            .await
+            .unwrap()
+            .expect("expected a committee detail");
+
+        assert_eq!(detail.name, "FRIENDS OF DEMOCRACY");
+        assert_eq!(detail.treasurer_name.as_deref(), Some("ALICE TREASURER"));
+        assert_eq!(detail.filing_frequency.as_deref(), Some("Q"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_committee_missing_optional_fields() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/committee/C00000002/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    {
+                        "name": "PAC WITHOUT TREASURER",
+                        "treasurer_name": null,
+                        "filing_frequency": null
+                    }
+                ],
+                "pagination": {"count": 1, "pages": 1, "page": 1}
+            })))
+            .mount(&server)
+            .await;
+
+        let config = make_config(server.uri());
+        let scraper = FecScraper::new(config);
+        let runtime = ScraperRuntime::new_unlimited();
+
+        let detail = scraper
+            .fetch_committee(&runtime, "C00000002")
+            .await
+            .unwrap()
+            .expect("expected a committee detail");
+
+        assert_eq!(detail.name, "PAC WITHOUT TREASURER");
+        assert!(detail.treasurer_name.is_none());
+        assert!(detail.filing_frequency.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_committee_empty_results_returns_none() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/committee/C99999999/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [],
+                "pagination": {"count": 0, "pages": 0, "page": 1}
+            })))
+            .mount(&server)
+            .await;
+
+        let config = make_config(server.uri());
+        let scraper = FecScraper::new(config);
+        let runtime = ScraperRuntime::new_unlimited();
+
+        let detail = scraper
+            .fetch_committee(&runtime, "C99999999")
+            .await
+            .unwrap();
+
+        assert!(detail.is_none(), "empty results should yield None");
     }
 }

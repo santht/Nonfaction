@@ -100,6 +100,8 @@ pub enum RelationshipType {
     ReceivedContract,
     /// Person made public statement about Entity
     StatedAbout,
+    /// Organization/Person was lobbied by a registrant on behalf of a client
+    LobbiedBy,
 }
 
 /// Additional typed properties depending on relationship type
@@ -221,6 +223,7 @@ mod tests {
             RelationshipType::Owns,
             RelationshipType::ReceivedContract,
             RelationshipType::StatedAbout,
+            RelationshipType::LobbiedBy,
         ];
 
         for rel_type in all {
@@ -253,6 +256,51 @@ mod tests {
         let rel = Relationship::new(from, to, RelationshipType::NamedIn, test_chain())
             .with_dates(start, Some(end));
 
+        assert_eq!(rel.start_date, Some(start));
+        assert_eq!(rel.end_date, Some(end));
+    }
+
+    #[test]
+    fn test_lobbied_by_relationship_creation() {
+        let from = EntityId::new();
+        let to = EntityId::new();
+        let rel = Relationship::new(from, to, RelationshipType::LobbiedBy, test_chain());
+        assert_eq!(rel.rel_type, RelationshipType::LobbiedBy);
+        assert_eq!(rel.from, from);
+        assert_eq!(rel.to, to);
+        assert_eq!(rel.version, 1);
+        assert_eq!(rel.sources.source_count(), 1);
+    }
+
+    #[test]
+    fn test_lobbied_by_serialization_roundtrip() {
+        let from = EntityId::new();
+        let to = EntityId::new();
+        let rel = Relationship::new(from, to, RelationshipType::LobbiedBy, test_chain());
+        let json = serde_json::to_string(&rel).expect("serialize should succeed");
+        assert!(
+            json.contains("LobbiedBy"),
+            "serialized JSON should contain 'LobbiedBy'"
+        );
+        let deserialized: Relationship =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(deserialized.rel_type, RelationshipType::LobbiedBy);
+        assert_eq!(deserialized.from, from);
+        assert_eq!(deserialized.to, to);
+    }
+
+    #[test]
+    fn test_lobbied_by_with_dates() {
+        let from = EntityId::new();
+        let to = EntityId::new();
+        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+        let rel = Relationship::new(from, to, RelationshipType::LobbiedBy, test_chain())
+            .with_dates(start, Some(end));
+
+        assert!(rel.active_on(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()));
+        assert!(!rel.active_on(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap()));
+        assert!(!rel.active_on(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()));
         assert_eq!(rel.start_date, Some(start));
         assert_eq!(rel.end_date, Some(end));
     }

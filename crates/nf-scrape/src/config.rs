@@ -225,6 +225,81 @@ impl Default for PacerConfig {
     }
 }
 
+// ── SourceConfigBuilder ───────────────────────────────────────────────────────
+
+/// Builder for [`SourceConfig`] with validation on [`build`](SourceConfigBuilder::build).
+#[derive(Debug, Default)]
+pub struct SourceConfigBuilder {
+    requests_per_second: Option<f64>,
+    burst_size: Option<f64>,
+    max_retries: Option<u32>,
+    retry_base_delay_ms: Option<u64>,
+    scrape_interval_secs: Option<u64>,
+}
+
+impl SourceConfigBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn requests_per_second(mut self, rps: f64) -> Self {
+        self.requests_per_second = Some(rps);
+        self
+    }
+
+    pub fn burst_size(mut self, burst: f64) -> Self {
+        self.burst_size = Some(burst);
+        self
+    }
+
+    pub fn max_retries(mut self, retries: u32) -> Self {
+        self.max_retries = Some(retries);
+        self
+    }
+
+    pub fn retry_base_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.retry_base_delay_ms = Some(delay_ms);
+        self
+    }
+
+    pub fn scrape_interval_secs(mut self, secs: u64) -> Self {
+        self.scrape_interval_secs = Some(secs);
+        self
+    }
+
+    /// Validate settings and produce a [`SourceConfig`].
+    ///
+    /// Returns an error string if:
+    /// - `requests_per_second` is not > 0
+    /// - `burst_size` is < 1
+    pub fn build(self) -> Result<SourceConfig, String> {
+        let defaults = SourceConfig::default();
+        let rps = self.requests_per_second.unwrap_or(defaults.requests_per_second);
+        let burst = self.burst_size.unwrap_or(defaults.burst_size);
+
+        if rps <= 0.0 {
+            return Err(format!(
+                "requests_per_second must be > 0, got {rps}"
+            ));
+        }
+        if burst < 1.0 {
+            return Err(format!("burst_size must be >= 1, got {burst}"));
+        }
+
+        Ok(SourceConfig {
+            requests_per_second: rps,
+            burst_size: burst,
+            max_retries: self.max_retries.unwrap_or(defaults.max_retries),
+            retry_base_delay_ms: self
+                .retry_base_delay_ms
+                .unwrap_or(defaults.retry_base_delay_ms),
+            scrape_interval_secs: self
+                .scrape_interval_secs
+                .unwrap_or(defaults.scrape_interval_secs),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +342,69 @@ mod tests {
         let cfg = PacerConfig::default();
         assert!(cfg.base_url.contains("pacer"));
         assert!(cfg.api_token.is_none());
+    }
+
+    // ── SourceConfigBuilder tests ─────────────────────────────────────────────
+
+    #[test]
+    fn builder_uses_defaults_when_nothing_set() {
+        let cfg = SourceConfigBuilder::new().build().unwrap();
+        let defaults = SourceConfig::default();
+        assert_eq!(cfg.requests_per_second, defaults.requests_per_second);
+        assert_eq!(cfg.burst_size, defaults.burst_size);
+        assert_eq!(cfg.max_retries, defaults.max_retries);
+        assert_eq!(cfg.retry_base_delay_ms, defaults.retry_base_delay_ms);
+        assert_eq!(cfg.scrape_interval_secs, defaults.scrape_interval_secs);
+    }
+
+    #[test]
+    fn builder_applies_custom_values() {
+        let cfg = SourceConfigBuilder::new()
+            .requests_per_second(10.0)
+            .burst_size(20.0)
+            .max_retries(5)
+            .retry_base_delay_ms(200)
+            .scrape_interval_secs(7200)
+            .build()
+            .unwrap();
+        assert_eq!(cfg.requests_per_second, 10.0);
+        assert_eq!(cfg.burst_size, 20.0);
+        assert_eq!(cfg.max_retries, 5);
+        assert_eq!(cfg.retry_base_delay_ms, 200);
+        assert_eq!(cfg.scrape_interval_secs, 7200);
+    }
+
+    #[test]
+    fn builder_rejects_zero_requests_per_second() {
+        let result = SourceConfigBuilder::new()
+            .requests_per_second(0.0)
+            .build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requests_per_second"));
+    }
+
+    #[test]
+    fn builder_rejects_negative_requests_per_second() {
+        let result = SourceConfigBuilder::new()
+            .requests_per_second(-1.5)
+            .build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requests_per_second"));
+    }
+
+    #[test]
+    fn builder_rejects_burst_size_below_one() {
+        let result = SourceConfigBuilder::new().burst_size(0.5).build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("burst_size"));
+    }
+
+    #[test]
+    fn builder_accepts_burst_size_exactly_one() {
+        let cfg = SourceConfigBuilder::new()
+            .burst_size(1.0)
+            .build()
+            .unwrap();
+        assert_eq!(cfg.burst_size, 1.0);
     }
 }

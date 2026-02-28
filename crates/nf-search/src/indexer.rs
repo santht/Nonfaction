@@ -248,6 +248,13 @@ impl EntityIndexer {
                 }
                 maybe_add_date(&mut doc, s.date, pd.date);
             }
+
+            Entity::LobbyingActivity(la) => {
+                doc.add_text(s.name, la.registrant_name.as_str());
+                doc.add_text(s.content, la.client_name.as_str());
+                doc.add_text(s.content, la.issue_area.as_str());
+                maybe_add_date(&mut doc, s.date, la.filing_date);
+            }
         }
 
         doc
@@ -269,6 +276,7 @@ fn entity_meta(entity: &Entity) -> &EntityMeta {
         Entity::ConductComparison(e) => &e.meta,
         Entity::PublicStatement(e) => &e.meta,
         Entity::PolicyDecision(e) => &e.meta,
+        Entity::LobbyingActivity(e) => &e.meta,
     }
 }
 

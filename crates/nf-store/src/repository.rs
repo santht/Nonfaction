@@ -117,6 +117,7 @@ fn entity_version(entity: &Entity) -> i64 {
         Entity::ConductComparison(e) => e.meta.version,
         Entity::PublicStatement(e) => e.meta.version,
         Entity::PolicyDecision(e) => e.meta.version,
+        Entity::LobbyingActivity(e) => e.meta.version,
     };
     v as i64
 }
@@ -134,6 +135,7 @@ fn entity_created_at(entity: &Entity) -> chrono::DateTime<chrono::Utc> {
         Entity::ConductComparison(e) => e.meta.created_at,
         Entity::PublicStatement(e) => e.meta.created_at,
         Entity::PolicyDecision(e) => e.meta.created_at,
+        Entity::LobbyingActivity(e) => e.meta.created_at,
     }
 }
 
@@ -150,6 +152,7 @@ fn entity_updated_at(entity: &Entity) -> chrono::DateTime<chrono::Utc> {
         Entity::ConductComparison(e) => e.meta.updated_at,
         Entity::PublicStatement(e) => e.meta.updated_at,
         Entity::PolicyDecision(e) => e.meta.updated_at,
+        Entity::LobbyingActivity(e) => e.meta.updated_at,
     }
 }
 
