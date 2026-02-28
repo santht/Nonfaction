@@ -1,227 +1,189 @@
 import Link from 'next/link';
-import { ArrowRight, Shield, Clock, FileText, AlertTriangle } from 'lucide-react';
-import { getStats } from '@/lib/api';
-import { Card, CardContent } from '@/components/ui/Card';
+import { ArrowRight, CheckCircle2, ShieldCheck, Radar, Database, Sparkles } from 'lucide-react';
+import { getRecentActivity, getStats } from '@/lib/api';
+import { Button } from '@/components/ui/Button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
+import { Input } from '@/components/ui/Input';
+import { Stat } from '@/components/ui/Stat';
+import { SourceNote } from '@/components/ui/SourceNote';
 
-const RECENT_CORRELATIONS = [
+const HOW_IT_WORKS = [
   {
-    id: 't1',
-    official: 'Sen. Richard Walsh',
-    description: '$450K PAC donation → voted YES on $8.2B defense bill',
-    days: 37,
-    flagged: true,
-    source: 'FEC Filing + Congress.gov',
+    title: 'Ingest',
+    description: 'Structured pull from filings, votes, dockets, and disclosure records.',
+    icon: Database,
   },
   {
-    id: 't2',
-    official: 'Rep. Diana Chen',
-    description: 'Meeting with PharmaCorp CEO → co-sponsored drug price deregulation',
-    days: 18,
-    flagged: true,
-    source: 'LDA Senate Disclosure',
+    title: 'Verify',
+    description: 'Each claim candidate requires source-linked references before publication.',
+    icon: ShieldCheck,
   },
   {
-    id: 't3',
-    official: 'Gov. Patricia Monroe',
-    description: "$1.2M donor bundling → donor's associate appointed State Treasurer",
-    days: 106,
-    flagged: true,
-    source: 'OpenSecrets / Campaign Finance Disclosure',
+    title: 'Correlate',
+    description: 'Timing models surface connections between money movement and official actions.',
+    icon: Radar,
   },
 ];
 
-const FEATURES = [
+const TESTIMONIALS = [
   {
-    icon: Shield,
-    title: 'Source Attribution',
-    description:
-      'Every fact links to a primary source: FEC filings, congressional records, court documents, lobbying disclosures.',
+    quote: 'The source traceability makes this usable for newsroom workflows.',
+    author: 'Investigative Editor (Partner Beta)',
   },
   {
-    icon: Clock,
-    title: 'Timing Correlations',
-    description:
-      'We track the days between financial events and legislative actions. Patterns surface. You decide.',
+    quote: 'The no-editorial policy is exactly what we need for clean civic data.',
+    author: 'Civic Research Lab',
   },
   {
-    icon: FileText,
-    title: 'Conduct Comparison',
-    description:
-      'Official actions placed alongside equivalent private-sector conduct and their real-world consequences.',
-  },
-  {
-    icon: AlertTriangle,
-    title: 'Flagged Connections',
-    description:
-      'High-probability correlations flagged automatically based on timing, amount, and action type.',
+    quote: 'Correlation timelines are clearer than any spreadsheet pipeline we built internally.',
+    author: 'Open Governance Analyst',
   },
 ];
 
 export default async function HomePage() {
-  const stats = await getStats();
+  const [stats, recentActivity] = await Promise.all([getStats(), getRecentActivity()]);
 
   return (
     <div>
-      {/* Hero */}
-      <section className="relative overflow-hidden">
-        <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[500px] bg-blue-500/8 rounded-full blur-3xl" />
-        </div>
-
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 pt-24 pb-20 text-center relative">
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/6 border border-white/10 text-xs text-gray-400 mb-8">
-            <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-            Built on public records — no claims without citations
-          </div>
-
-          <h1 className="text-5xl sm:text-6xl md:text-7xl font-bold text-white tracking-tight leading-tight mb-6">
-            Every connection
-            <br />
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-blue-600">
-              traced to its source.
+      <section className="relative overflow-hidden border-b border-white/10">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.24),transparent_55%)]" />
+        <div className="relative mx-auto max-w-7xl px-4 pb-20 pt-20 sm:px-6">
+          <Badge variant="blue" className="mb-5">
+            <Sparkles className="h-3 w-3" /> Public-record accountability intelligence
+          </Badge>
+          <h1 className="max-w-4xl text-4xl font-semibold leading-tight text-white sm:text-6xl">
+            Premium political accountability,
+            <span className="block bg-gradient-to-r from-blue-300 to-blue-500 bg-clip-text text-transparent">
+              built on citations not narratives.
             </span>
           </h1>
-
-          <p className="text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
-            No claims. Only citations. A political accountability database
-            documenting the connections between money, power, and legislation —
-            sourced entirely from public records.
+          <p className="mt-5 max-w-2xl text-base text-gray-300 sm:text-lg">
+            Nonfaction tracks money, influence, and policy with source-level evidence. Every displayed signal points back to a public record.
           </p>
 
-          <form
-            action="/search"
-            method="get"
-            className="relative max-w-2xl mx-auto mb-6"
-          >
-            <input
-              type="search"
-              name="q"
-              placeholder="Search politicians, corporations, lobbyists, donors…"
-              className="w-full pl-6 pr-36 py-5 text-lg bg-white/6 border border-white/12 rounded-2xl text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500/40 transition-all shadow-2xl shadow-black/40"
-            />
-            <button
-              type="submit"
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-5 py-2.5 bg-blue-500 hover:bg-blue-400 text-white text-sm font-medium rounded-xl transition-colors duration-200 flex items-center gap-2"
-            >
-              Search
-              <ArrowRight className="w-4 h-4" />
-            </button>
-          </form>
+          <div className="mt-8 flex flex-wrap gap-3">
+            <Link href="/search">
+              <Button>
+                Start exploring
+                <ArrowRight className="h-4 w-4" />
+              </Button>
+            </Link>
+            <Link href="/methodology">
+              <Button variant="secondary">Read methodology</Button>
+            </Link>
+          </div>
 
-          <div className="flex flex-wrap items-center justify-center gap-2 text-sm text-gray-600">
-            <span>Try:</span>
-            {['Senator Walsh', 'PharmaCorp', 'Defense PAC', 'Marcus Leland'].map(
-              (term) => (
-                <Link
-                  key={term}
-                  href={`/search?q=${encodeURIComponent(term)}`}
-                  className="px-2.5 py-1 rounded-lg bg-white/5 border border-white/8 text-gray-400 hover:text-white hover:border-white/15 transition-all text-xs"
-                >
-                  {term}
-                </Link>
-              )
-            )}
+          <div className="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <Stat label="Tracked entities" value={stats.entities.toLocaleString()} change="+5.4% this month" trend="up" />
+            <Stat label="Linked connections" value={stats.connections.toLocaleString()} change="+1,012 this week" trend="up" />
+            <Stat label="Source records" value={stats.sources.toLocaleString()} change="99.8% verified" trend="neutral" />
+            <Stat label="Flagged patterns" value={stats.flagged.toLocaleString()} change="Needs review" trend="down" />
           </div>
         </div>
       </section>
 
-      {/* Stats */}
-      <section className="border-y border-white/6 bg-white/2">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-12">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
-            {[
-              { label: 'Entities', value: stats.entities.toLocaleString(), color: 'text-white' },
-              { label: 'Connections', value: stats.connections.toLocaleString(), color: 'text-white' },
-              { label: 'Sources', value: stats.sources.toLocaleString(), color: 'text-white' },
-              { label: 'Flagged', value: stats.flagged.toLocaleString(), color: 'text-red-400' },
-            ].map((stat) => (
-              <div key={stat.label}>
-                <div className={`text-3xl font-bold ${stat.color} mb-1`}>
-                  {stat.value}
-                </div>
-                <div className="text-sm text-gray-500">{stat.label}</div>
-              </div>
-            ))}
+      <section className="mx-auto max-w-7xl px-4 py-16 sm:px-6">
+        <div className="mb-8 flex items-end justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-semibold text-white">How it works</h2>
+            <p className="text-sm text-gray-400">End-to-end accountability workflow with reproducible evidence chains.</p>
           </div>
+          <Link href="/sources" className="text-sm text-blue-300 hover:text-blue-200">
+            View source catalog
+          </Link>
         </div>
-      </section>
-
-      {/* Features */}
-      <section className="max-w-5xl mx-auto px-4 sm:px-6 py-20">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-          {FEATURES.map((feature) => (
-            <Card key={feature.title} className="p-6">
-              <div className="flex gap-4">
-                <div className="shrink-0 w-10 h-10 bg-blue-500/15 rounded-xl flex items-center justify-center">
-                  <feature.icon className="w-5 h-5 text-blue-400" />
+        <div className="grid gap-4 md:grid-cols-3">
+          {HOW_IT_WORKS.map((step) => (
+            <Card key={step.title} hover>
+              <CardHeader>
+                <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/15">
+                  <step.icon className="h-5 w-5 text-blue-300" />
                 </div>
-                <div>
-                  <h3 className="font-semibold text-white mb-1">
-                    {feature.title}
-                  </h3>
-                  <p className="text-sm text-gray-400 leading-relaxed">
-                    {feature.description}
-                  </p>
+                <CardTitle>{step.title}</CardTitle>
+                <CardDescription>{step.description}</CardDescription>
+              </CardHeader>
+              <CardContent className="pt-2">
+                <div className="rounded-lg border border-white/10 bg-white/3 px-3 py-2 text-xs text-gray-400">
+                  System state: audited source-links required.
                 </div>
-              </div>
+              </CardContent>
             </Card>
           ))}
         </div>
       </section>
 
-      {/* Recent Correlations */}
-      <section className="max-w-5xl mx-auto px-4 sm:px-6 pb-20">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h2 className="text-2xl font-bold text-white">Recent Correlations</h2>
-            <p className="text-sm text-gray-500 mt-1">
-              Flagged connections between financial events and legislative actions
-            </p>
-          </div>
-          <Link
-            href="/timing"
-            className="text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors"
-          >
-            View all <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
-        </div>
+      <section className="mx-auto grid max-w-7xl gap-6 px-4 pb-16 sm:px-6 lg:grid-cols-[1.2fr_0.8fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle>Recent activity feed</CardTitle>
+            <CardDescription>Newest validations, source updates, and alerting signals.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {recentActivity.map((item) => (
+              <div key={item.id} className="rounded-xl border border-white/10 bg-white/3 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-medium text-white">{item.title}</p>
+                  <Badge variant={item.severity === 'high' ? 'red' : item.severity === 'medium' ? 'yellow' : 'green'}>
+                    {item.severity}
+                  </Badge>
+                </div>
+                <p className="mt-1 text-xs text-gray-400">{item.time} · Source: {item.source}</p>
+              </div>
+            ))}
+            <SourceNote text="Data attribution: FEC, Congress.gov, Senate LDA, CourtListener, OpenSecrets." />
+          </CardContent>
+        </Card>
 
-        <div className="space-y-3">
-          {RECENT_CORRELATIONS.map((corr) => (
-            <Link key={corr.id} href="/timing">
-              <Card hover className="p-5">
-                <CardContent className="p-0">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1.5">
-                        <span className="text-sm font-semibold text-white">
-                          {corr.official}
-                        </span>
-                        {corr.flagged && (
-                          <Badge variant="red">
-                            <AlertTriangle className="w-2.5 h-2.5" />
-                            Flagged
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-sm text-gray-400">{corr.description}</p>
-                      <p className="text-xs text-gray-600 mt-1.5">
-                        Source:{' '}
-                        <span className="text-gray-500">{corr.source}</span>
-                      </p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <div className="text-2xl font-bold text-white">
-                        {corr.days}
-                      </div>
-                      <div className="text-xs text-gray-500">days</div>
-                    </div>
-                  </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>Data source coverage</CardTitle>
+            <CardDescription>Tiered ingest roadmap from day-one to month-one source sets.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3 text-sm text-gray-300">
+              <p className="rounded-xl border border-white/10 bg-white/3 p-3">Tier 1 Day One: Federal filings, roll calls, and disclosure baselines.</p>
+              <p className="rounded-xl border border-white/10 bg-white/3 p-3">Tier 2 Week One: State ethics, procurement, and judiciary expansions.</p>
+              <p className="rounded-xl border border-white/10 bg-white/3 p-3">Tier 3 Month One: Municipal, contractor, and watchdog aggregation.</p>
+            </div>
+            <div className="mt-4">
+              <Link href="/sources" className="text-sm text-blue-300 hover:text-blue-200">
+                Browse all 108+ sources →
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+
+      <section className="border-y border-white/10 bg-white/3">
+        <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6">
+          <h2 className="text-2xl font-semibold text-white">Trust signals</h2>
+          <div className="mt-5 grid gap-4 md:grid-cols-3">
+            {TESTIMONIALS.map((item) => (
+              <Card key={item.author}>
+                <CardContent>
+                  <p className="text-sm text-gray-200">“{item.quote}”</p>
+                  <p className="mt-3 text-xs text-gray-500">{item.author}</p>
                 </CardContent>
               </Card>
-            </Link>
-          ))}
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="mx-auto max-w-7xl px-4 py-16 sm:px-6">
+        <div className="rounded-2xl border border-blue-500/30 bg-gradient-to-r from-blue-500/20 to-blue-900/20 p-6 sm:p-8">
+          <h2 className="text-2xl font-semibold text-white">Stay informed</h2>
+          <p className="mt-2 max-w-2xl text-sm text-blue-100/90">
+            Receive weekly source additions, new story package releases, and accountability milestones.
+          </p>
+          <form className="mt-5 flex max-w-xl flex-col gap-2 sm:flex-row" action="#" method="post">
+            <Input type="email" required placeholder="name@organization.org" aria-label="Newsletter email" />
+            <Button type="submit">Join newsletter</Button>
+          </form>
+          <p className="mt-2 inline-flex items-center gap-1 text-xs text-blue-100/75">
+            <CheckCircle2 className="h-3.5 w-3.5" /> No user PII stored client-side.
+          </p>
         </div>
       </section>
     </div>

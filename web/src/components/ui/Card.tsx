@@ -1,20 +1,19 @@
 import { cn } from '@/lib/utils';
+import { type HTMLAttributes } from 'react';
 
-interface CardProps {
-  className?: string;
-  children: React.ReactNode;
+interface CardProps extends HTMLAttributes<HTMLDivElement> {
   hover?: boolean;
 }
 
-export function Card({ className, children, hover = false }: CardProps) {
+export function Card({ className, children, hover = false, ...props }: CardProps) {
   return (
     <div
       className={cn(
-        'rounded-xl border border-white/8 bg-white/4 backdrop-blur-sm',
-        hover &&
-          'hover:border-white/15 hover:bg-white/6 transition-all duration-200',
+        'rounded-xl border border-white/10 bg-white/4 backdrop-blur-sm',
+        hover && 'hover:border-white/20 hover:bg-white/6 transition-all duration-200',
         className
       )}
+      {...props}
     >
       {children}
     </div>
@@ -28,7 +27,7 @@ export function CardHeader({
   className?: string;
   children: React.ReactNode;
 }) {
-  return <div className={cn('px-6 pt-6 pb-0', className)}>{children}</div>;
+  return <div className={cn('px-6 pt-6', className)}>{children}</div>;
 }
 
 export function CardContent({
@@ -48,11 +47,7 @@ export function CardTitle({
   className?: string;
   children: React.ReactNode;
 }) {
-  return (
-    <h3 className={cn('text-lg font-semibold text-white', className)}>
-      {children}
-    </h3>
-  );
+  return <h3 className={cn('text-lg font-semibold text-white', className)}>{children}</h3>;
 }
 
 export function CardDescription({
@@ -62,7 +57,5 @@ export function CardDescription({
   className?: string;
   children: React.ReactNode;
 }) {
-  return (
-    <p className={cn('text-sm text-gray-400 mt-1', className)}>{children}</p>
-  );
+  return <p className={cn('mt-1 text-sm text-gray-400', className)}>{children}</p>;
 }

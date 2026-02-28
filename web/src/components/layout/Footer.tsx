@@ -1,79 +1,123 @@
 import Link from 'next/link';
-import { Database, Github } from 'lucide-react';
+import { Database, Github, Mail } from 'lucide-react';
+import { Input } from '@/components/ui/Input';
+import { Button } from '@/components/ui/Button';
+
+const databaseLinks = [
+  { href: '/search', label: 'Search' },
+  { href: '/officials', label: 'Officials' },
+  { href: '/timing', label: 'Timing Correlations' },
+  { href: '/conduct', label: 'Conduct Comparison' },
+  { href: '/graph', label: 'Network Graph' },
+];
+
+const communityLinks = [
+  { href: '/submit', label: 'Submit Connection' },
+  { href: '/leaderboard', label: 'Leaderboard' },
+  { href: '/watchlist', label: 'Watchlist' },
+  { href: '/story-packages', label: 'Story Packages' },
+  { href: '/updates', label: 'Updates' },
+];
+
+const legalLinks = [
+  { href: '/privacy', label: 'Privacy Policy' },
+  { href: '/terms', label: 'Terms of Service' },
+  { href: '/contact', label: 'Contact' },
+  { href: '/faq', label: 'FAQ' },
+];
 
 export function Footer() {
   return (
-    <footer className="border-t border-white/6 bg-[#0A0F1C] mt-20">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-10">
-          {/* Brand */}
+    <footer className="mt-16 border-t border-white/10 bg-[#090e1a]">
+      <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6">
+        <div className="grid grid-cols-1 gap-10 md:grid-cols-2 xl:grid-cols-4">
           <div>
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-7 h-7 bg-blue-500 rounded-lg flex items-center justify-center shadow-lg shadow-blue-500/30">
-                <Database className="w-4 h-4 text-white" />
+            <div className="mb-4 flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-500 shadow-lg shadow-blue-500/30">
+                <Database className="h-4 w-4 text-white" />
               </div>
-              <span className="font-semibold text-white">Nonfaction</span>
+              <span className="text-base font-semibold text-white">Nonfaction</span>
             </div>
-            <p className="text-sm text-gray-500 leading-relaxed max-w-xs">
-              Every connection traced to its source. No claims. Only citations.
-              A political accountability database built on public records.
+            <p className="max-w-sm text-sm text-gray-400">
+              Every connection traced to source records. No editorial framing. Built with public records and open methods.
             </p>
+            <a
+              href="mailto:santht@proton.me"
+              className="mt-4 inline-flex items-center gap-2 text-sm text-blue-300 transition-colors hover:text-blue-200"
+            >
+              <Mail className="h-4 w-4" />
+              santht@proton.me
+            </a>
+            <a
+              href="https://github.com/santht/Nonfaction"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-3 block text-sm text-gray-300 transition-colors hover:text-white"
+            >
+              github.com/santht/Nonfaction
+            </a>
           </div>
 
-          {/* Navigation */}
-          <div>
-            <h4 className="text-sm font-semibold text-gray-300 mb-4">
-              Database
-            </h4>
-            <ul className="space-y-2.5">
-              {[
-                { href: '/search', label: 'Explore Entities' },
-                { href: '/timing', label: 'Timing Correlations' },
-                { href: '/conduct', label: 'Conduct Comparison' },
-                { href: '/submit', label: 'Submit a Connection' },
-              ].map((link) => (
-                <li key={link.href}>
-                  <Link
-                    href={link.href}
-                    className="text-sm text-gray-500 hover:text-white transition-colors"
-                  >
-                    {link.label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </div>
+          <FooterCol title="Database" links={databaseLinks} />
+          <FooterCol title="Community" links={communityLinks} />
+          <FooterCol title="Legal" links={legalLinks} />
+        </div>
 
-          {/* Principles */}
-          <div>
-            <h4 className="text-sm font-semibold text-gray-300 mb-4">
-              Principles
-            </h4>
-            <ul className="space-y-2.5 text-sm text-gray-500">
-              <li>Every fact carries a source</li>
-              <li>No anonymous claims accepted</li>
-              <li>Public records only</li>
-              <li>No editorial opinion</li>
-            </ul>
+        <div className="mt-10 rounded-2xl border border-white/10 bg-white/4 p-4 sm:p-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <p className="text-sm font-medium text-white">Newsletter</p>
+              <p className="text-xs text-gray-400">Get source additions, major investigations, and release notes.</p>
+            </div>
+            <form className="flex w-full max-w-md gap-2" action="#" method="post">
+              <Input
+                type="email"
+                name="newsletterEmail"
+                placeholder="name@domain.com"
+                required
+                aria-label="Email address"
+              />
+              <Button type="submit" size="sm">Subscribe</Button>
+            </form>
           </div>
         </div>
 
-        <div className="mt-10 pt-6 border-t border-white/6 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <p className="text-xs text-gray-600">
-            © {new Date().getFullYear()} Nonfaction. All data sourced from
-            public records. No claims without citations.
-          </p>
+        <div className="mt-8 flex flex-col gap-3 border-t border-white/10 pt-6 text-xs text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+          <p>© {new Date().getFullYear()} Nonfaction. Built with public records.</p>
           <a
-            href="https://github.com"
+            href="https://github.com/santht/Nonfaction"
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center gap-2 text-xs text-gray-500 hover:text-white transition-colors"
+            className="inline-flex items-center gap-1 text-gray-400 transition-colors hover:text-white"
           >
-            <Github className="w-3.5 h-3.5" />
-            Open Source
+            <Github className="h-3.5 w-3.5" />
+            Open source repository
           </a>
         </div>
       </div>
     </footer>
+  );
+}
+
+function FooterCol({
+  title,
+  links,
+}: {
+  title: string;
+  links: { href: string; label: string }[];
+}) {
+  return (
+    <div>
+      <h4 className="mb-3 text-sm font-semibold text-gray-200">{title}</h4>
+      <ul className="space-y-2">
+        {links.map((link) => (
+          <li key={link.href}>
+            <Link href={link.href} className="text-sm text-gray-400 transition-colors hover:text-white">
+              {link.label}
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
