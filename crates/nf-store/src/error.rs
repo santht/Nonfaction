@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+pub type StoreResult<T> = Result<T, StoreError>;
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("Database error: {0}")]

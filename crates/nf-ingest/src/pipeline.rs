@@ -1,10 +1,14 @@
-use crate::csv::{CsvExtracted, parse_csv};
+use crate::csv::{parse_csv, CsvExtracted};
+use crate::dedup::IngestDeduplicator;
 use crate::error::{IngestError, IngestResult};
-use crate::html::{HtmlExtracted, extract_html};
-use crate::pdf::{PdfExtracted, extract_pdf};
+use crate::html::{extract_html, HtmlExtracted};
+use crate::normalize::{
+    normalize_date, normalize_dollar_amount, normalize_person_name, normalize_state,
+};
+use crate::pdf::{extract_pdf, PdfExtracted};
 use crate::table::Table;
 use nf_core::source::ContentHash;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// The extracted content returned by the ingestion pipeline
 #[derive(Debug)]
@@ -171,6 +175,265 @@ impl DeduplicationStore {
     /// Clear all stored hashes.
     pub fn clear(&mut self) {
         self.seen.clear();
+    }
+}
+
+// ── IngestPipeline ────────────────────────────────────────────────────────────
+
+/// A raw record arriving from an external data source before normalisation.
+#[derive(Debug, Clone)]
+pub struct RawRecord {
+    /// Identifies the data source (e.g. `"fec"`, `"lobbying"`, `"congress"`).
+    pub source_type: String,
+    /// Key-value pairs representing the record fields.
+    pub fields: HashMap<String, String>,
+    /// Optional raw text blob (e.g. original CSV row or JSON string).
+    pub raw_text: Option<String>,
+}
+
+impl RawRecord {
+    /// Create a new `RawRecord` from a source type and fields map.
+    pub fn new(source_type: impl Into<String>, fields: HashMap<String, String>) -> Self {
+        Self {
+            source_type: source_type.into(),
+            fields,
+            raw_text: None,
+        }
+    }
+
+    /// Attach the original raw text to the record.
+    pub fn with_raw_text(mut self, text: impl Into<String>) -> Self {
+        self.raw_text = Some(text.into());
+        self
+    }
+}
+
+/// A validation error produced by the pipeline's validate stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationError {
+    /// Zero-based index of the originating record within the input batch.
+    pub record_index: usize,
+    /// Field name that failed validation.
+    pub field: String,
+    /// Human-readable reason for the failure.
+    pub reason: String,
+}
+
+/// Aggregate result returned by `IngestPipeline::run`.
+#[derive(Debug, Default)]
+pub struct PipelineResult {
+    /// Number of records that successfully completed all stages.
+    pub processed: usize,
+    /// Number of records dropped as content-based duplicates.
+    pub skipped_duplicate: usize,
+    /// Validation errors collected across all records.
+    pub validation_errors: Vec<ValidationError>,
+}
+
+/// Configuration for the ingestion pipeline.
+#[derive(Debug, Clone)]
+pub struct PipelineConfig {
+    /// Maximum number of records processed per batch in a single `run` call.
+    /// Records beyond this limit are silently truncated.
+    pub batch_size: usize,
+    /// Maximum number of times a failed validation record is re-validated
+    /// (future use — currently informational).
+    pub max_retries: u32,
+    /// When `true`, the deduplication stage is active and duplicate records
+    /// are dropped before normalisation.
+    pub dedup_enabled: bool,
+    /// Required field names that every record must carry.  A missing or empty
+    /// required field produces a `ValidationError`.
+    pub required_fields: Vec<String>,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 1_000,
+            max_retries: 3,
+            dedup_enabled: true,
+            required_fields: vec![],
+        }
+    }
+}
+
+/// Orchestrates the full ingestion pipeline:
+///
+/// ```text
+/// parse ─► deduplicate ─► validate ─► normalize ─► emit
+/// ```
+///
+/// Each stage operates on a `Vec<RawRecord>`, filtering or transforming
+/// records as needed.  The pipeline is stateful: the deduplicator persists
+/// across multiple `run` calls so that cross-batch duplicates are detected.
+pub struct IngestPipeline {
+    config: PipelineConfig,
+    deduplicator: IngestDeduplicator,
+}
+
+impl IngestPipeline {
+    /// Create a new pipeline with the given configuration.
+    pub fn new(config: PipelineConfig) -> Self {
+        Self {
+            config,
+            deduplicator: IngestDeduplicator::new(),
+        }
+    }
+
+    /// Create a pipeline with the default configuration.
+    pub fn with_defaults() -> Self {
+        Self::new(PipelineConfig::default())
+    }
+
+    /// Run the pipeline over a batch of raw records.
+    ///
+    /// Stages in order:
+    /// 1. **Parse** — apply the batch size cap.
+    /// 2. **Deduplicate** — drop records whose content fingerprint has been
+    ///    seen before (when `dedup_enabled`).
+    /// 3. **Validate** — check required fields are present and non-empty;
+    ///    collect `ValidationError`s but keep records in the pipeline.
+    /// 4. **Normalize** — normalise well-known field names in-place
+    ///    (`name`, `amount`, `date`, `state`).
+    /// 5. **Emit** — return the processed count alongside collected errors.
+    pub fn run(&mut self, records: Vec<RawRecord>) -> PipelineResult {
+        let mut result = PipelineResult::default();
+
+        // Stage 1: parse (cap at batch_size)
+        let batch: Vec<RawRecord> = records.into_iter().take(self.config.batch_size).collect();
+
+        // Stage 2: deduplicate
+        let (deduped, dup_count) = if self.config.dedup_enabled {
+            self.stage_deduplicate(batch)
+        } else {
+            (batch, 0)
+        };
+        result.skipped_duplicate = dup_count;
+
+        // Stage 3: validate
+        let (validated, mut val_errors) = self.stage_validate(deduped);
+        result.validation_errors.append(&mut val_errors);
+
+        // Stage 4: normalize
+        let normalised = self.stage_normalize(validated);
+
+        // Stage 5: emit
+        result.processed = normalised.len();
+        result
+    }
+
+    // ── stages ───────────────────────────────────────────────────────────────
+
+    /// Deduplicate records using content fingerprints.
+    ///
+    /// Returns `(kept_records, duplicate_count)`.
+    fn stage_deduplicate(&mut self, records: Vec<RawRecord>) -> (Vec<RawRecord>, usize) {
+        let mut kept = Vec::with_capacity(records.len());
+        let mut dup_count = 0usize;
+
+        for record in records {
+            // Build fingerprint from source_type + sorted field pairs
+            let mut field_pairs: Vec<(&str, &str)> = record
+                .fields
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            field_pairs.sort_by_key(|(k, _)| *k);
+
+            let fp = IngestDeduplicator::fingerprint(&record.source_type, &field_pairs);
+
+            if self.deduplicator.is_duplicate(fp) {
+                dup_count += 1;
+            } else {
+                kept.push(record);
+            }
+        }
+
+        (kept, dup_count)
+    }
+
+    /// Validate each record against the configured required fields.
+    ///
+    /// Records with validation errors are *not* dropped — errors are
+    /// collected and surfaced in `PipelineResult`.
+    fn stage_validate(&self, records: Vec<RawRecord>) -> (Vec<RawRecord>, Vec<ValidationError>) {
+        let mut errors = Vec::new();
+
+        for (idx, record) in records.iter().enumerate() {
+            for required in &self.config.required_fields {
+                match record.fields.get(required.as_str()) {
+                    None => {
+                        errors.push(ValidationError {
+                            record_index: idx,
+                            field: required.clone(),
+                            reason: format!("required field '{}' is missing", required),
+                        });
+                    }
+                    Some(val) if val.trim().is_empty() => {
+                        errors.push(ValidationError {
+                            record_index: idx,
+                            field: required.clone(),
+                            reason: format!("required field '{}' is present but empty", required),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        (records, errors)
+    }
+
+    /// Normalise well-known fields in place.
+    ///
+    /// | Field key  | Normalisation applied              |
+    /// |------------|------------------------------------|
+    /// | `name`     | `normalize_person_name`            |
+    /// | `amount`   | `normalize_dollar_amount` → string |
+    /// | `date`     | `normalize_date` → ISO 8601 string |
+    /// | `state`    | `normalize_state`                  |
+    fn stage_normalize(&self, mut records: Vec<RawRecord>) -> Vec<RawRecord> {
+        for record in &mut records {
+            if let Some(name) = record.fields.get("name").cloned() {
+                let normalised = normalize_person_name(&name);
+                if !normalised.is_empty() {
+                    record.fields.insert("name".to_string(), normalised);
+                }
+            }
+
+            if let Some(amount) = record.fields.get("amount").cloned() {
+                if let Some(val) = normalize_dollar_amount(&amount) {
+                    record.fields.insert("amount".to_string(), val.to_string());
+                }
+            }
+
+            if let Some(date) = record.fields.get("date").cloned() {
+                if let Some(d) = normalize_date(&date) {
+                    record
+                        .fields
+                        .insert("date".to_string(), d.format("%Y-%m-%d").to_string());
+                }
+            }
+
+            if let Some(state) = record.fields.get("state").cloned() {
+                if let Some(abbrev) = normalize_state(&state) {
+                    record.fields.insert("state".to_string(), abbrev);
+                }
+            }
+        }
+
+        records
+    }
+
+    /// Return a reference to the current pipeline configuration.
+    pub fn config(&self) -> &PipelineConfig {
+        &self.config
+    }
+
+    /// Return a reference to the underlying deduplicator.
+    pub fn deduplicator(&self) -> &IngestDeduplicator {
+        &self.deduplicator
     }
 }
 

@@ -37,6 +37,73 @@ impl Default for VerifyConfig {
     }
 }
 
+/// Statistics summarising a batch verification run.
+#[derive(Debug, Clone)]
+pub struct BatchStats {
+    /// Number of sources that were successfully verified (confidence ≥ 0.5).
+    pub verified: usize,
+    /// Number of sources that failed verification or returned an error.
+    pub failed: usize,
+    /// Number of sources where verification was not applicable.
+    pub not_applicable: usize,
+    /// Average confidence across all successful (non-error) results.
+    pub avg_confidence: f64,
+}
+
+impl BatchStats {
+    /// Fraction of processed sources that were verified, excluding not-applicable ones.
+    ///
+    /// Returns `0.0` if no sources were processed.
+    pub fn success_rate(&self) -> f64 {
+        let total = self.verified + self.failed;
+        if total == 0 {
+            return 0.0;
+        }
+        self.verified as f64 / total as f64
+    }
+}
+
+/// Compute aggregate statistics from a slice of batch verification results.
+pub fn compute_batch_stats(results: &[VerifyResult<VerificationResult>]) -> BatchStats {
+    let mut verified = 0usize;
+    let mut failed = 0usize;
+    let mut not_applicable = 0usize;
+    let mut confidence_sum = 0.0f64;
+    let mut confidence_count = 0usize;
+
+    for result in results {
+        match result {
+            Ok(r) => {
+                if matches!(&r.output, VerifyOutput::NotApplicable(_)) {
+                    not_applicable += 1;
+                } else if r.is_verified() {
+                    verified += 1;
+                } else {
+                    failed += 1;
+                }
+                confidence_sum += r.confidence;
+                confidence_count += 1;
+            }
+            Err(_) => {
+                failed += 1;
+            }
+        }
+    }
+
+    let avg_confidence = if confidence_count > 0 {
+        confidence_sum / confidence_count as f64
+    } else {
+        0.0
+    };
+
+    BatchStats {
+        verified,
+        failed,
+        not_applicable,
+        avg_confidence,
+    }
+}
+
 /// Run the verification pipeline on a `SourceRef`.
 ///
 /// Routing logic:
@@ -381,5 +448,135 @@ mod tests {
         let results = verify_batch(&client, &[source], &config).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
+    }
+
+    // --- BatchStats / compute_batch_stats tests ---
+
+    fn make_ok_verified() -> VerifyResult<VerificationResult> {
+        use crate::url::UrlVerifyResult;
+        let url = UrlVerifyResult {
+            url: "https://example.com".to_string(),
+            is_live: true,
+            status_code: Some(200),
+            archive_available: false,
+            archive_url: None,
+        };
+        Ok(VerificationResult::from_output(VerifyOutput::Url(url)))
+    }
+
+    fn make_ok_failed() -> VerifyResult<VerificationResult> {
+        use crate::url::UrlVerifyResult;
+        let url = UrlVerifyResult {
+            url: "https://dead.example.com".to_string(),
+            is_live: false,
+            status_code: Some(404),
+            archive_available: false,
+            archive_url: None,
+        };
+        Ok(VerificationResult::from_output(VerifyOutput::Url(url)))
+    }
+
+    fn make_ok_not_applicable() -> VerifyResult<VerificationResult> {
+        Ok(VerificationResult::from_output(VerifyOutput::NotApplicable(
+            "test".to_string(),
+        )))
+    }
+
+    fn make_err() -> VerifyResult<VerificationResult> {
+        Err(VerifyError::NotApplicable("error".to_string()))
+    }
+
+    #[test]
+    fn test_batch_stats_empty() {
+        let stats = compute_batch_stats(&[]);
+        assert_eq!(stats.verified, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.not_applicable, 0);
+        assert_eq!(stats.avg_confidence, 0.0);
+        assert_eq!(stats.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_batch_stats_all_verified() {
+        let results = vec![make_ok_verified(), make_ok_verified()];
+        let stats = compute_batch_stats(&results);
+        assert_eq!(stats.verified, 2);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.not_applicable, 0);
+        assert_eq!(stats.success_rate(), 1.0);
+        assert!(stats.avg_confidence > 0.0);
+    }
+
+    #[test]
+    fn test_batch_stats_all_failed() {
+        let results = vec![make_ok_failed(), make_ok_failed()];
+        let stats = compute_batch_stats(&results);
+        assert_eq!(stats.verified, 0);
+        assert_eq!(stats.failed, 2);
+        assert_eq!(stats.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_batch_stats_error_counts_as_failed() {
+        let results = vec![make_ok_verified(), make_err()];
+        let stats = compute_batch_stats(&results);
+        assert_eq!(stats.verified, 1);
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.success_rate(), 0.5);
+    }
+
+    #[test]
+    fn test_batch_stats_not_applicable_excluded_from_success_rate() {
+        let results = vec![
+            make_ok_verified(),
+            make_ok_not_applicable(),
+            make_ok_not_applicable(),
+        ];
+        let stats = compute_batch_stats(&results);
+        assert_eq!(stats.verified, 1);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.not_applicable, 2);
+        // success_rate only looks at verified + failed (denominator = 1)
+        assert_eq!(stats.success_rate(), 1.0);
+    }
+
+    #[test]
+    fn test_batch_stats_mixed() {
+        let results = vec![
+            make_ok_verified(),
+            make_ok_failed(),
+            make_ok_not_applicable(),
+            make_err(),
+        ];
+        let stats = compute_batch_stats(&results);
+        assert_eq!(stats.verified, 1);
+        assert_eq!(stats.failed, 2); // one ok_failed + one err
+        assert_eq!(stats.not_applicable, 1);
+        // success_rate = 1 / (1 + 2) = 1/3
+        assert!((stats.success_rate() - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_batch_stats_avg_confidence_computed_from_ok_results_only() {
+        // make_ok_verified → confidence 0.85 (live, no archive)
+        // make_ok_failed   → confidence 0.0
+        // make_err         → not counted in avg_confidence
+        let results = vec![make_ok_verified(), make_ok_failed(), make_err()];
+        let stats = compute_batch_stats(&results);
+        // avg = (0.85 + 0.0) / 2
+        let expected = (0.85 + 0.0) / 2.0;
+        assert!((stats.avg_confidence - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_success_rate_no_applicable_items() {
+        // Only not_applicable and errors
+        let results = vec![make_ok_not_applicable(), make_err()];
+        let stats = compute_batch_stats(&results);
+        assert_eq!(stats.not_applicable, 1);
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.verified, 0);
+        // Denominator for success_rate = verified + failed = 0 + 1 = 1
+        assert_eq!(stats.success_rate(), 0.0);
     }
 }

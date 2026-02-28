@@ -9,10 +9,10 @@ pub mod url;
 
 pub use error::{VerifyError, VerifyResult};
 pub use pipeline::{
-    VerifyConfig, VerifyOutput, verify_batch, verify_person_by_name, verify_source,
-    verify_source_with_result,
+    BatchStats, VerifyConfig, VerifyOutput, compute_batch_stats, verify_batch,
+    verify_person_by_name, verify_source, verify_source_with_result,
 };
-pub use result::{Evidence, VerificationResult};
+pub use result::{ConfidenceLevel, Evidence, VerificationResult};
 pub use url::{
     ArchiveSaveResult, FreshnessResult, archive_url_wayback, archive_url_wayback_with_base,
     check_freshness,

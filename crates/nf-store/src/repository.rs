@@ -1,13 +1,14 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::Row;
 use uuid::Uuid;
 
-use nf_core::entities::Entity;
+use nf_core::entities::{Entity, EntityId};
 use nf_core::relationships::Relationship;
 
 use crate::db::DbPool;
-use crate::error::StoreError;
+use crate::error::{StoreError, StoreResult};
 
 // ─── Pagination ───────────────────────────────────────────────────────────────
 
@@ -56,6 +57,32 @@ impl<T> Page<T> {
         }
         ((self.total_count as u32) + self.page_size - 1) / self.page_size
     }
+}
+
+// ─── Cursor-based pagination ──────────────────────────────────────────────────
+
+/// Opaque cursor for keyset pagination: `(created_at, id)` tuple.
+///
+/// Using a composite cursor over `(created_at, id)` guarantees stable ordering
+/// even under concurrent writes — rows can only be missed with offset pagination.
+pub type EntityCursor = (DateTime<Utc>, EntityId);
+
+/// A single page produced by cursor-based pagination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorPage<T> {
+    pub items: Vec<T>,
+    /// Cursor to pass to the next `list_after_cursor` call; `None` if exhausted.
+    pub next_cursor: Option<EntityCursor>,
+    pub has_more: bool,
+}
+
+// ─── Batch result ─────────────────────────────────────────────────────────────
+
+/// Aggregate outcome of a batch upsert operation.
+#[derive(Debug)]
+pub struct BatchResult {
+    pub succeeded: usize,
+    pub failed: Vec<(EntityId, StoreError)>,
 }
 
 // ─── Repository trait ─────────────────────────────────────────────────────────
@@ -464,6 +491,125 @@ impl EntityRepository {
         page_size: u32,
     ) -> Result<Page<Entity>, StoreError> {
         self.list_by_type("Document", page, page_size).await
+    }
+
+    /// Cursor-based (keyset) pagination over all entities ordered by `(created_at, id)`.
+    ///
+    /// Pass `cursor: None` for the first page. Use `CursorPage::next_cursor` from the
+    /// previous response as the cursor for the next page. This is safe under concurrent
+    /// writes — no rows are skipped or duplicated as long as `(created_at, id)` is unique.
+    ///
+    /// Fetches `limit + 1` rows internally to determine whether more pages exist.
+    pub async fn list_after_cursor(
+        &self,
+        cursor: Option<EntityCursor>,
+        limit: usize,
+    ) -> StoreResult<CursorPage<Entity>> {
+        if limit == 0 {
+            return Ok(CursorPage {
+                items: vec![],
+                next_cursor: None,
+                has_more: false,
+            });
+        }
+
+        let fetch_limit = (limit + 1) as i64;
+
+        let rows = match cursor {
+            None => {
+                sqlx::query(
+                    "SELECT data FROM entities \
+                     ORDER BY created_at ASC, id ASC LIMIT $1",
+                )
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            Some((cur_created_at, cur_id)) => {
+                sqlx::query(
+                    "SELECT data FROM entities \
+                     WHERE (created_at > $1 OR (created_at = $1 AND id > $2)) \
+                     ORDER BY created_at ASC, id ASC LIMIT $3",
+                )
+                .bind(cur_created_at)
+                .bind(cur_id.0)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+
+        let mut items = deserialize_entity_rows(rows)?;
+        let has_more = items.len() > limit;
+        if has_more {
+            items.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            items
+                .last()
+                .map(|e| (entity_created_at(e), EntityId(entity_uuid(e))))
+        } else {
+            None
+        };
+
+        Ok(CursorPage {
+            items,
+            next_cursor,
+            has_more,
+        })
+    }
+
+    /// Batch upsert entities, processing them in chunks of 100.
+    ///
+    /// Each entity is inserted or, if its `id` already exists, updated in place.
+    /// Per-entity errors are collected rather than aborting the entire batch, so
+    /// a single malformed entity never blocks the rest of the ingestion pipeline.
+    pub async fn upsert_batch(&self, entities: &[Entity]) -> StoreResult<BatchResult> {
+        let mut succeeded = 0usize;
+        let mut failed: Vec<(EntityId, StoreError)> = Vec::new();
+
+        for chunk in entities.chunks(100) {
+            for entity in chunk {
+                let entity_id = EntityId(entity_uuid(entity));
+                let entity_type = entity.type_name();
+                let version = entity_version(entity);
+                let created_at = entity_created_at(entity);
+                let updated_at = entity_updated_at(entity);
+                let data = match serde_json::to_value(entity) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        failed.push((entity_id, StoreError::Serialization(e)));
+                        continue;
+                    }
+                };
+
+                let result = sqlx::query(
+                    "INSERT INTO entities (id, entity_type, version, data, created_at, updated_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6) \
+                     ON CONFLICT (id) DO UPDATE SET \
+                       entity_type = EXCLUDED.entity_type, \
+                       data        = EXCLUDED.data, \
+                       version     = EXCLUDED.version, \
+                       updated_at  = EXCLUDED.updated_at",
+                )
+                .bind(entity_id.0)
+                .bind(entity_type)
+                .bind(version)
+                .bind(data)
+                .bind(created_at)
+                .bind(updated_at)
+                .execute(&self.pool)
+                .await;
+
+                match result {
+                    Ok(_) => succeeded += 1,
+                    Err(e) => failed.push((entity_id, map_sqlx_write_error(e))),
+                }
+            }
+        }
+
+        Ok(BatchResult { succeeded, failed })
     }
 }
 
@@ -1587,6 +1733,252 @@ mod tests {
 
         let recent = repo.list_recent(0).await.unwrap();
         assert!(recent.is_empty());
+
+        pool.close().await;
+    }
+
+    // ── Unit tests: cursor pagination ─────────────────────────────────────────
+
+    #[test]
+    fn test_cursor_page_zero_limit_no_db() {
+        // CursorPage with 0 items should report has_more = false.
+        let page: CursorPage<i32> = CursorPage {
+            items: vec![],
+            next_cursor: None,
+            has_more: false,
+        };
+        assert!(page.items.is_empty());
+        assert!(!page.has_more);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn test_batch_result_fields() {
+        let result = BatchResult {
+            succeeded: 5,
+            failed: vec![],
+        };
+        assert_eq!(result.succeeded, 5);
+        assert!(result.failed.is_empty());
+    }
+
+    // ── DB-dependent tests: cursor pagination ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_list_after_cursor_zero_limit() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let page = repo.list_after_cursor(None, 0).await.unwrap();
+        assert!(page.items.is_empty());
+        assert!(!page.has_more);
+        assert!(page.next_cursor.is_none());
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_after_cursor_first_page() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        // Insert a couple of persons.
+        let sc = test_source_chain();
+        let p1 = Person::new("CursorA", sc.clone());
+        let p2 = Person::new("CursorB", sc.clone());
+        let id1 = p1.meta.id.0;
+        let id2 = p2.meta.id.0;
+        repo.insert(&Entity::Person(p1)).await.unwrap();
+        repo.insert(&Entity::Person(p2)).await.unwrap();
+
+        let page = repo.list_after_cursor(None, 100).await.unwrap();
+        assert!(!page.items.is_empty());
+        // Our two entities must be present.
+        let ids: Vec<_> = page.items.iter().map(entity_uuid).collect();
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+
+        repo.delete(id1).await.unwrap();
+        repo.delete(id2).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_after_cursor_pagination_1000_entities() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        // Insert 1000 persons.
+        let sc = test_source_chain();
+        let mut inserted_ids = Vec::with_capacity(1000);
+        for i in 0..1000usize {
+            let p = Person::new(format!("CursorPerson{i:04}"), sc.clone());
+            let id = p.meta.id.0;
+            repo.insert(&Entity::Person(p)).await.unwrap();
+            inserted_ids.push(id);
+        }
+
+        // Paginate through all entities with page size 100 and collect ids.
+        let mut collected_ids = std::collections::HashSet::new();
+        let mut cursor: Option<EntityCursor> = None;
+        let page_size = 100;
+        let mut page_count = 0;
+
+        loop {
+            let page = repo.list_after_cursor(cursor.clone(), page_size).await.unwrap();
+            for entity in &page.items {
+                collected_ids.insert(entity_uuid(entity));
+            }
+            page_count += 1;
+            if !page.has_more {
+                break;
+            }
+            cursor = page.next_cursor;
+            assert!(cursor.is_some(), "has_more=true requires a next_cursor");
+            // Safety valve: we can't have more pages than entities.
+            if page_count > 100 {
+                break;
+            }
+        }
+
+        // All 1000 inserted entities must have been visited.
+        for id in &inserted_ids {
+            assert!(
+                collected_ids.contains(id),
+                "Entity {id} missing from cursor pagination"
+            );
+        }
+
+        // Clean up.
+        for id in &inserted_ids {
+            repo.delete(*id).await.unwrap();
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_after_cursor_no_skip_during_pages() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let sc = test_source_chain();
+        let mut ids = Vec::new();
+        for i in 0..5usize {
+            let p = Person::new(format!("NoSkip{i}"), sc.clone());
+            ids.push(p.meta.id.0);
+            repo.insert(&Entity::Person(p)).await.unwrap();
+        }
+
+        // Page size of 2 should need 3 pages to cover 5+ entities.
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor: Option<EntityCursor> = None;
+        for _ in 0..20 {
+            let page = repo.list_after_cursor(cursor.clone(), 2).await.unwrap();
+            for e in &page.items {
+                let id = entity_uuid(e);
+                assert!(!seen.contains(&id), "Cursor pagination duplicated entity {id}");
+                seen.insert(id);
+            }
+            if !page.has_more {
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+
+        // All 5 entities must have been seen.
+        for id in &ids {
+            assert!(seen.contains(id), "Entity {id} was skipped in cursor pagination");
+        }
+
+        for id in &ids {
+            repo.delete(*id).await.unwrap();
+        }
+        pool.close().await;
+    }
+
+    // ── DB-dependent tests: batch upsert ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_upsert_batch_inserts_new_entities() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let sc = test_source_chain();
+        let entities: Vec<Entity> = (0..5)
+            .map(|i| Entity::Person(Person::new(format!("BatchInsert{i}"), sc.clone())))
+            .collect();
+        let ids: Vec<_> = entities.iter().map(entity_uuid).collect();
+
+        let result = repo.upsert_batch(&entities).await.unwrap();
+        assert_eq!(result.succeeded, 5);
+        assert!(result.failed.is_empty());
+
+        for id in &ids {
+            assert!(repo.get(*id).await.unwrap().is_some(), "Entity {id} should be stored");
+        }
+
+        for id in &ids {
+            repo.delete(*id).await.unwrap();
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_upsert_batch_updates_existing_entities() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let sc = test_source_chain();
+        let mut person = Person::new("BatchUpdate Original", sc.clone());
+        let id = person.meta.id.0;
+        repo.insert(&Entity::Person(person.clone())).await.unwrap();
+
+        // Change name and upsert the same entity.
+        person.name = "BatchUpdate Modified".to_string();
+        let result = repo.upsert_batch(&[Entity::Person(person)]).await.unwrap();
+        assert_eq!(result.succeeded, 1);
+        assert!(result.failed.is_empty());
+
+        let fetched = repo.get(id).await.unwrap().unwrap();
+        if let Entity::Person(p) = fetched {
+            assert_eq!(p.name, "BatchUpdate Modified");
+        } else {
+            panic!("Expected Person");
+        }
+
+        repo.delete(id).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_upsert_batch_1000_entities() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let sc = test_source_chain();
+        let entities: Vec<Entity> = (0..1000)
+            .map(|i| Entity::Person(Person::new(format!("Bulk{i:04}"), sc.clone())))
+            .collect();
+        let ids: Vec<_> = entities.iter().map(entity_uuid).collect();
+
+        let result = repo.upsert_batch(&entities).await.unwrap();
+        assert_eq!(result.succeeded, 1000, "All 1000 entities should succeed");
+        assert!(result.failed.is_empty());
+
+        for id in &ids {
+            repo.delete(*id).await.unwrap();
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_upsert_batch_empty_slice() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let result = repo.upsert_batch(&[]).await.unwrap();
+        assert_eq!(result.succeeded, 0);
+        assert!(result.failed.is_empty());
 
         pool.close().await;
     }

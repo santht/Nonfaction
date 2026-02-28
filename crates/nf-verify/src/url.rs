@@ -2,6 +2,11 @@ use crate::error::{VerifyError, VerifyResult};
 use std::time::Instant;
 use url::Url;
 
+/// HTTP status codes considered transient and eligible for retry.
+const TRANSIENT_STATUS_CODES: &[u16] = &[429, 500, 502, 503, 504];
+/// Exponential backoff delays (ms) for each retry attempt.
+const RETRY_BACKOFF_MS: [u64; 3] = [100, 200, 400];
+
 /// Result of checking a URL's liveness
 #[derive(Debug, Clone)]
 pub struct UrlVerifyResult {
@@ -85,7 +90,7 @@ async fn check_url_liveness(
     client: &reqwest::Client,
     url: &str,
 ) -> VerifyResult<(bool, Option<u16>)> {
-    let resp = match client.head(url).send().await {
+    let resp = match head_with_retry(client, url).await {
         Ok(r) => r,
         Err(e) => {
             // Try GET if HEAD fails (some servers don't support HEAD)
@@ -103,6 +108,25 @@ async fn check_url_liveness(
     let status = resp.status().as_u16();
     let is_live = resp.status().is_success();
     Ok((is_live, Some(status)))
+}
+
+/// Send a HEAD request with up to 3 retries and exponential backoff for
+/// transient HTTP error status codes (429, 500, 502, 503, 504).
+async fn head_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut resp = client.head(url).send().await?;
+
+    for &delay_ms in &RETRY_BACKOFF_MS {
+        if !TRANSIENT_STATUS_CODES.contains(&resp.status().as_u16()) {
+            return Ok(resp);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        resp = client.head(url).send().await?;
+    }
+
+    Ok(resp)
 }
 
 async fn check_wayback_availability(
@@ -502,5 +526,169 @@ mod tests {
         let client = reqwest::Client::new();
         let result = check_freshness(&client, "not-a-url").await;
         assert!(matches!(result, Err(VerifyError::InvalidUrl(_))));
+    }
+
+    // --- Retry logic tests ---
+
+    #[tokio::test]
+    async fn test_retry_on_503_then_200() {
+        let server = MockServer::start().await;
+
+        // First request returns 503, second returns 200
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        // Also mock wayback for the full verify_url call
+        let wayback_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "archived_snapshots": {}
+            })))
+            .mount(&wayback_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            verify_url_with_wayback_base(&client, &server.uri(), &wayback_server.uri())
+                .await
+                .unwrap();
+
+        // After retry the URL should appear live
+        assert!(result.is_live);
+        assert_eq!(result.status_code, Some(200));
+    }
+
+    #[tokio::test]
+    async fn test_retry_on_429_then_200() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(429))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let wayback_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "archived_snapshots": {}
+            })))
+            .mount(&wayback_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            verify_url_with_wayback_base(&client, &server.uri(), &wayback_server.uri())
+                .await
+                .unwrap();
+
+        assert!(result.is_live);
+        assert_eq!(result.status_code, Some(200));
+    }
+
+    #[tokio::test]
+    async fn test_no_retry_on_404() {
+        // 404 is not transient; should NOT retry and should return immediately
+        let server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1) // must be called exactly once (no retry)
+            .mount(&server)
+            .await;
+
+        let wayback_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "archived_snapshots": {}
+            })))
+            .mount(&wayback_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            verify_url_with_wayback_base(&client, &server.uri(), &wayback_server.uri())
+                .await
+                .unwrap();
+
+        assert!(!result.is_live);
+        assert_eq!(result.status_code, Some(404));
+    }
+
+    #[tokio::test]
+    async fn test_all_retries_exhausted_returns_last_status() {
+        let server = MockServer::start().await;
+
+        // All 4 attempts (initial + 3 retries) return 500
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let wayback_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "archived_snapshots": {}
+            })))
+            .mount(&wayback_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result =
+            verify_url_with_wayback_base(&client, &server.uri(), &wayback_server.uri())
+                .await
+                .unwrap();
+
+        // After all retries, final 500 → not live
+        assert!(!result.is_live);
+        assert_eq!(result.status_code, Some(500));
+    }
+
+    #[tokio::test]
+    async fn test_transient_codes_are_retried() {
+        // Verify that each defined transient status code triggers a retry
+        for &code in TRANSIENT_STATUS_CODES {
+            let server = MockServer::start().await;
+
+            Mock::given(method("HEAD"))
+                .respond_with(ResponseTemplate::new(code))
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("HEAD"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+
+            let wayback_server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "archived_snapshots": {}
+                })))
+                .mount(&wayback_server)
+                .await;
+
+            let client = reqwest::Client::new();
+            let result =
+                verify_url_with_wayback_base(&client, &server.uri(), &wayback_server.uri())
+                    .await
+                    .unwrap();
+
+            assert!(
+                result.is_live,
+                "expected live after retry from status {code}"
+            );
+        }
     }
 }

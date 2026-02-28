@@ -4,10 +4,13 @@ pub mod archive;
 pub mod audit;
 pub mod audited_repository;
 pub mod db;
+pub mod dedup;
 pub mod error;
 pub mod migration;
 pub mod repository;
 
 pub use audited_repository::{AuditedEntityRepository, AuditedRelationshipRepository};
 pub use db::DbPool;
-pub use error::StoreError;
+pub use dedup::{DedupCandidate, EntityDeduplicator};
+pub use error::{StoreError, StoreResult};
+pub use repository::{BatchResult, CursorPage, EntityCursor};

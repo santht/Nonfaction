@@ -340,12 +340,10 @@ mod tests {
         assert_eq!(entities.amounts.len(), 2);
         assert_eq!(entities.amounts[0].text, "$1,500");
         assert_eq!(entities.amounts[1].text, "$2.3 million");
-        assert!(
-            entities
-                .amounts
-                .iter()
-                .all(|e| e.kind == EntityKind::MonetaryAmount)
-        );
+        assert!(entities
+            .amounts
+            .iter()
+            .all(|e| e.kind == EntityKind::MonetaryAmount));
     }
 
     #[test]
@@ -587,12 +585,10 @@ mod tests {
     fn test_filing_number_kind_is_correct() {
         let text = "Matter: 24-cr-12345.";
         let entities = extract_entities(text);
-        assert!(
-            entities
-                .filing_numbers
-                .iter()
-                .all(|e| e.kind == EntityKind::FilingNumber)
-        );
+        assert!(entities
+            .filing_numbers
+            .iter()
+            .all(|e| e.kind == EntityKind::FilingNumber));
     }
 
     #[test]

@@ -2027,6 +2027,7 @@ name = "nf-ingest"
 version = "0.1.0"
 dependencies = [
  "assert_matches",
+ "chrono",
  "lopdf",
  "nf-core",
  "pdf-extract",
