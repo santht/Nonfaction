@@ -1,0 +1,24 @@
+name = "nonfaction-api"
+main = "infra/worker/src/index.ts"
+compatibility_date = "2024-12-01"
+account_id = "6f5726955e570fc3323769f2cb335b15"
+
+# Custom domain routing
+routes = [
+  { pattern = "api.nonfaction.org/*", zone_name = "nonfaction.org" }
+]
+
+# D1 database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "nonfaction-db"
+database_id = "950c7431-61c2-4d5f-877f-3bc35436fd35"
+
+# KV namespace for caching search results and rate limit state
+# [[kv_namespaces]]
+# binding = "CACHE"
+# id = "TBD"
+
+[vars]
+ENVIRONMENT = "production"
+API_VERSION = "v1"
