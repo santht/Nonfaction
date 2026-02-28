@@ -224,6 +224,7 @@ impl NfSearcher {
             "ConductComparison",
             "PublicStatement",
             "PolicyDecision",
+            "LobbyingActivity",
         ];
 
         let mut facets = Vec::new();
