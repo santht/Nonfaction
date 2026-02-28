@@ -75,11 +75,9 @@ fn extract_meta_description(doc: &Html) -> Option<String> {
 }
 
 fn extract_text(doc: &Html) -> String {
-    // Remove script and style elements from consideration by selecting body text
     let sel = match Selector::parse("body") {
         Ok(s) => s,
         Err(_) => {
-            // Fallback: get all text from the document
             return doc
                 .root_element()
                 .text()
@@ -91,19 +89,25 @@ fn extract_text(doc: &Html) -> String {
         }
     };
 
-    let script_sel = Selector::parse("script, style, noscript").ok();
+    // Collect IDs of script/style/noscript elements so we can skip their text children
+    let skip_sel = Selector::parse("script, style, noscript").ok();
+    let mut skip_ids = std::collections::HashSet::new();
+    if let Some(ref ss) = skip_sel {
+        for el in doc.select(ss) {
+            skip_ids.insert(el.id());
+            for desc in el.descendants() {
+                skip_ids.insert(desc.id());
+            }
+        }
+    }
 
     let body_texts: Vec<String> = doc
         .select(&sel)
         .flat_map(|body| {
             body.descendants()
                 .filter_map(|node| {
-                    // Filter out script/style nodes
-                    if let Some(elem) = node.value().as_element() {
-                        let tag = elem.name();
-                        if tag == "script" || tag == "style" || tag == "noscript" {
-                            return None;
-                        }
+                    if skip_ids.contains(&node.id()) {
+                        return None;
                     }
                     node.value().as_text().map(|t| t.trim().to_string())
                 })
@@ -111,9 +115,6 @@ fn extract_text(doc: &Html) -> String {
                 .collect::<Vec<_>>()
         })
         .collect();
-
-    // Ignore the script_sel variable (it's computed but only used to avoid panic)
-    let _ = script_sel;
 
     body_texts.join(" ")
 }

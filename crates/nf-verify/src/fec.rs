@@ -129,7 +129,7 @@ pub async fn verify_fec_filing_with_base(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path_regex, query_param};
+    use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn make_client() -> reqwest::Client {
@@ -154,24 +154,19 @@ mod tests {
         });
 
         Mock::given(method("GET"))
-            .and(path_regex("/v1/filings/"))
-            .and(query_param("filing_id", "12345"))
+            .and(path_regex("/filings/"))
             .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
             .mount(&server)
             .await;
 
         let client = make_client().await;
-        let base = format!("{}/v1", server.uri());
-        // Reconstruct base without /v1 since verify_fec_filing_with_base appends /v1
-        let base_no_v1 = server.uri();
 
-        let result = verify_fec_filing_with_base(&client, "12345", &base_no_v1).await.unwrap();
+        let result = verify_fec_filing_with_base(&client, "12345", &server.uri()).await.unwrap();
         assert!(result.found);
         assert_eq!(result.filing_id, "12345");
         let meta = result.metadata.unwrap();
         assert_eq!(meta.committee_id.as_deref(), Some("C00001234"));
         assert_eq!(meta.report_year, Some(2024));
-        let _ = base;
     }
 
     #[tokio::test]
@@ -184,8 +179,7 @@ mod tests {
         });
 
         Mock::given(method("GET"))
-            .and(path_regex("/v1/filings/"))
-            .and(query_param("filing_id", "99999"))
+            .and(path_regex("/filings/"))
             .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
             .mount(&server)
             .await;
@@ -203,7 +197,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path_regex("/v1/filings/"))
+            .and(path_regex("/filings/"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;

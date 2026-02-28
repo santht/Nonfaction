@@ -569,7 +569,7 @@ impl ScrapeSource for FecScraper {
 mod tests {
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_config(base_url: String) -> FecConfig {

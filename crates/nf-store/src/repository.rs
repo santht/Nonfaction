@@ -464,6 +464,7 @@ fn deserialize_relationship_rows(
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(unused_imports)]
 mod tests {
     use super::*;
     use nf_core::entities::{EntityId, EntityMeta, Organization, OrganizationType, Person};
@@ -604,7 +605,7 @@ mod tests {
             })
             .collect();
 
-        for id in &ids {
+        for _id in &ids {
             // Re-create person with that specific id is complicated; just insert fresh ones.
             let p = Person::new("list test", test_source_chain());
             let e = Entity::Person(p);
