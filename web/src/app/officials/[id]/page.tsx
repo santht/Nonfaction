@@ -1,4 +1,4 @@
-import { notFound } from 'next/navigation';
+import { redirect } from 'next/navigation';
 import { Download, Bell, ExternalLink } from 'lucide-react';
 import { getOfficialProfile, getRelatedEntities } from '@/lib/api';
 import { Badge } from '@/components/ui/Badge';
@@ -7,12 +7,16 @@ import { Button } from '@/components/ui/Button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { SourceNote } from '@/components/ui/SourceNote';
 
+export function generateStaticParams() {
+  return [{ id: 'o1' }, { id: 'o2' }, { id: 'o3' }, { id: 'o4' }, { id: 'o5' }, { id: 'o6' }];
+}
+
 export default async function OfficialProfilePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const profile = await getOfficialProfile(id);
 
   if (!profile) {
-    notFound();
+    redirect('/officials');
   }
 
   const related = await getRelatedEntities(profile.relatedEntityIds);
