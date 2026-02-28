@@ -214,12 +214,14 @@ pub async fn create_entity(
     validate_entity_for_creation(&entity)?;
 
     let id = state.entity_repo.insert(&entity).await?;
+    let entity_type = entity.type_name();
+    tracing::info!(entity_id = %id, entity_type = entity_type, "entity created");
 
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
             "id": id,
-            "entity_type": entity.type_name(),
+            "entity_type": entity_type,
         })),
     ))
 }

@@ -5,6 +5,11 @@ use axum::{
 };
 use serde_json::json;
 use thiserror::Error;
+use tokio::task_local;
+
+task_local! {
+    static REQUEST_ID: Option<String>;
+}
 
 /// All API-level error types with mapping to HTTP status codes.
 #[derive(Debug, Error)]
@@ -84,13 +89,21 @@ impl IntoResponse for ApiError {
         let status = self.status_code();
         let code = self.error_code();
         let message = self.to_string();
+        let request_id = current_request_id();
 
-        tracing::error!(error = %message, code = code, status = %status, "API error");
+        tracing::error!(
+            error = %message,
+            code = code,
+            status = %status,
+            request_id = ?request_id,
+            "API error"
+        );
 
         let body = json!({
             "error": {
                 "code": code,
                 "message": message,
+                "request_id": request_id,
             }
         });
 
@@ -100,10 +113,23 @@ impl IntoResponse for ApiError {
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
+pub async fn with_request_id<T>(
+    request_id: Option<String>,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    REQUEST_ID.scope(request_id, fut).await
+}
+
+fn current_request_id() -> Option<String> {
+    REQUEST_ID.try_with(Clone::clone).ok().flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use axum::response::IntoResponse;
+    use serde_json::Value;
 
     #[test]
     fn test_not_found_status() {
@@ -131,5 +157,28 @@ mod tests {
         let err = ApiError::NotFound("test entity".to_string());
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_error_response_includes_error_code() {
+        let response = ApiError::BadRequest("invalid input".to_string()).into_response();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["error"]["code"], "BAD_REQUEST");
+    }
+
+    #[tokio::test]
+    async fn test_error_response_includes_request_id() {
+        let response = with_request_id(
+            Some("req-123".to_string()),
+            async { ApiError::NotFound("entity missing".to_string()).into_response() },
+        )
+        .await;
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["error"]["request_id"], "req-123");
+        assert_eq!(payload["error"]["code"], "NOT_FOUND");
     }
 }

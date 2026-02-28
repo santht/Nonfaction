@@ -157,7 +157,8 @@ pub async fn create_submission(
     State(state): State<AppState>,
     Json(req): Json<CreateSubmissionRequest>,
 ) -> ApiResult<(StatusCode, Json<SubmissionResponse>)> {
-    let contributor_id = ContributorId(req.contributor_id);
+    let contributor_uuid = req.contributor_id;
+    let contributor_id = ContributorId(contributor_uuid);
     let submission_type = req.submission_type.into_submission_type();
 
     let sub_id = {
@@ -173,6 +174,11 @@ pub async fn create_submission(
             )
             .map_err(|e| ApiError::BadRequest(e.to_string()))?
     };
+    tracing::info!(
+        submission_id = %sub_id.0,
+        contributor_id = %contributor_uuid,
+        "submission created"
+    );
 
     let queue = state.submission_queue.lock().unwrap();
     let submission = queue
@@ -245,6 +251,11 @@ pub async fn review_submission(
 ) -> ApiResult<Json<SubmissionResponse>> {
     let submission_id = SubmissionId(id);
     let reviewer_id = ContributorId(req.reviewer_id);
+    let decision = match &req.decision {
+        ReviewDecisionRequest::Claim => "claim",
+        ReviewDecisionRequest::Approve => "approve",
+        ReviewDecisionRequest::Reject { .. } => "reject",
+    };
 
     {
         let mut queue = state.submission_queue.lock().unwrap();
@@ -267,6 +278,12 @@ pub async fn review_submission(
             }
         }
     }
+    tracing::info!(
+        submission_id = %submission_id.0,
+        reviewer_id = %reviewer_id.0,
+        decision = decision,
+        "submission review action applied"
+    );
 
     let queue = state.submission_queue.lock().unwrap();
     let submission = queue

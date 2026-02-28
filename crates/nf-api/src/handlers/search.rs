@@ -118,6 +118,12 @@ pub async fn search(
         .collect();
 
     let total_results = results.len();
+    tracing::info!(
+        query = %params.query,
+        entity_type = ?params.entity_type,
+        total_results = total_results,
+        "search completed"
+    );
 
     // Fetch facets (type breakdown for the query).
     let facets: Vec<FacetEntry> = state

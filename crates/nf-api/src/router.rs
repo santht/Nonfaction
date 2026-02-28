@@ -1,8 +1,10 @@
 use axum::{
+    body::Body,
     Json, Router,
     extract::{DefaultBodyLimit, State},
-    http::{HeaderName, StatusCode},
-    middleware,
+    http::{HeaderName, Request, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::{delete, get, post},
 };
 use serde_json::json;
@@ -114,9 +116,20 @@ pub fn build_router(state: AppState) -> Router {
                 .allow_headers(Any),
         )
         .layer(CompressionLayer::new())
+        .layer(middleware::from_fn(with_request_id_context))
         .layer(PropagateRequestIdLayer::new(x_request_id.clone()))
         .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid))
         .layer(TraceLayer::new_for_http())
+}
+
+async fn with_request_id_context(req: Request<Body>, next: Next) -> Response {
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+
+    crate::error::with_request_id(request_id, next.run(req)).await
 }
 
 /// GET /health — liveness probe (always 200).
