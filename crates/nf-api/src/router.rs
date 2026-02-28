@@ -1,7 +1,8 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderName, StatusCode},
+    middleware,
     routing::{delete, get, post},
 };
 use serde_json::json;
@@ -13,6 +14,7 @@ use tower_http::{
 };
 
 use crate::handlers::{docs, entities, export, graph, search, submissions, watchlist};
+use crate::rate_limit::RateLimiter;
 use crate::state::AppState;
 
 /// Build the full Axum router for the Nonfaction API.
@@ -39,16 +41,27 @@ use crate::state::AppState;
 ///   GET  /api/v1/stats
 ///   GET  /api/v1/audit/verify
 pub fn build_router(state: AppState) -> Router {
+    let post_rate_limiter = RateLimiter::per_minute(60);
+    let post_rate_limit_layer = middleware::from_fn_with_state(
+        post_rate_limiter.clone(),
+        crate::rate_limit::middleware,
+    );
+
     let v1 = Router::new()
         // ── Entities ─────────────────────────────────────────────────────────
+        .route("/entities", get(entities::list_entities))
         .route(
             "/entities",
-            get(entities::list_entities).post(entities::create_entity),
+            post(entities::create_entity).layer(post_rate_limit_layer.clone()),
         )
         .route("/entities/{id}", get(entities::get_entity))
         .route(
             "/entities/{id}/relationships",
-            get(entities::get_entity_relationships).post(entities::create_relationship),
+            get(entities::get_entity_relationships),
+        )
+        .route(
+            "/entities/{id}/relationships",
+            post(entities::create_relationship).layer(post_rate_limit_layer.clone()),
         )
         .route(
             "/entities/{id}/timeline",
@@ -67,14 +80,15 @@ pub fn build_router(state: AppState) -> Router {
             get(export::export_story_package),
         )
         // ── Submissions ─────────────────────────────────────────────────────
+        .route("/submissions", get(submissions::list_submissions))
         .route(
             "/submissions",
-            post(submissions::create_submission).get(submissions::list_submissions),
+            post(submissions::create_submission).layer(post_rate_limit_layer.clone()),
         )
         .route("/submissions/{id}", get(submissions::get_submission))
         .route(
             "/submissions/{id}/review",
-            post(submissions::review_submission),
+            post(submissions::review_submission).layer(post_rate_limit_layer),
         )
         // ── Watchlist ─────────────────────────────────────────────────────────
         .route("/watchlist/subscribe", post(watchlist::subscribe))
@@ -92,6 +106,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ready", get(readiness_check))
         .nest("/api/v1", v1)
         .with_state(state)
+        .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

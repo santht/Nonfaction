@@ -6,6 +6,7 @@
 pub mod error;
 pub mod handlers;
 pub mod pagination;
+pub mod rate_limit;
 pub mod router;
 pub mod state;
 
