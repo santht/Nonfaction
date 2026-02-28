@@ -578,4 +578,86 @@ mod tests {
         let chains = analyzer.detect_flow_chains(30, 2);
         assert!(chains.is_empty());
     }
+
+    #[test]
+    fn test_donation_to_vote_exact_threshold_not_flagged() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        let donation = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let vote = NaiveDate::from_ymd_opt(2024, 3, 31).unwrap(); // 90 days
+
+        engine.new_event(entity, EventType::Donation, donation);
+        let corrs = engine.new_event(entity, EventType::Vote, vote);
+        assert!(corrs.is_empty());
+    }
+
+    #[test]
+    fn test_lobbying_to_vote_exact_threshold_not_flagged() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        let lobbying = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let vote = NaiveDate::from_ymd_opt(2024, 6, 29).unwrap(); // 180 days
+
+        engine.new_event(entity, EventType::Lobbying, lobbying);
+        let corrs = engine.new_event(entity, EventType::Vote, vote);
+        assert!(corrs.is_empty());
+    }
+
+    #[test]
+    fn test_timing_correlation_contains_system_source() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        engine.new_event(
+            entity,
+            EventType::Donation,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        );
+        let corrs = engine.new_event(
+            entity,
+            EventType::Vote,
+            NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        );
+
+        assert_eq!(corrs.len(), 1);
+        let source = &corrs[0].meta.sources.primary;
+        assert_eq!(
+            source.source_url.as_str(),
+            "https://nonfaction.org/system/timing-engine"
+        );
+        assert_eq!(source.source_type, SourceType::OtherGovernment);
+        assert_eq!(source.submitted_by, "system");
+    }
+
+    #[test]
+    fn test_vote_generates_multiple_correlations_from_prior_events() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        engine.new_event(
+            entity,
+            EventType::Donation,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        );
+        engine.new_event(
+            entity,
+            EventType::Lobbying,
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+        );
+        let corrs = engine.new_event(
+            entity,
+            EventType::Vote,
+            NaiveDate::from_ymd_opt(2024, 2, 15).unwrap(),
+        );
+
+        assert_eq!(corrs.len(), 2);
+        assert!(
+            corrs
+                .iter()
+                .any(|c| c.correlation_type == CorrelationType::DonationToVote)
+        );
+        assert!(
+            corrs
+                .iter()
+                .any(|c| c.correlation_type == CorrelationType::LobbyingToVote)
+        );
+    }
 }

@@ -182,4 +182,78 @@ mod tests {
 
         assert!(rel.active_on(NaiveDate::from_ymd_opt(2030, 1, 1).unwrap()));
     }
+
+    #[test]
+    fn test_relationship_new_initializes_accessors_and_defaults() {
+        let from = EntityId::new();
+        let to = EntityId::new();
+        let rel = Relationship::new(from, to, RelationshipType::BusinessWith, test_chain());
+
+        assert_eq!(rel.from, from);
+        assert_eq!(rel.to, to);
+        assert_eq!(rel.rel_type, RelationshipType::BusinessWith);
+        assert_eq!(rel.sources.source_count(), 1);
+        assert_eq!(rel.version, 1);
+        assert!(rel.start_date.is_none());
+        assert!(rel.end_date.is_none());
+        assert!(rel.properties.amount.is_none());
+        assert!(rel.properties.role.is_none());
+    }
+
+    #[test]
+    fn test_relationship_all_types_constructible() {
+        let from = EntityId::new();
+        let to = EntityId::new();
+        let all = [
+            RelationshipType::DonatedTo,
+            RelationshipType::Pardoned,
+            RelationshipType::AppearedWith,
+            RelationshipType::PolicyDecision,
+            RelationshipType::HoldsPosition,
+            RelationshipType::NamedIn,
+            RelationshipType::FlightWith,
+            RelationshipType::BusinessWith,
+            RelationshipType::LobbiedFor,
+            RelationshipType::ForeignAgentFor,
+            RelationshipType::Appointed,
+            RelationshipType::FamilyOf,
+            RelationshipType::CorporateStructure,
+            RelationshipType::Owns,
+            RelationshipType::ReceivedContract,
+            RelationshipType::StatedAbout,
+        ];
+
+        for rel_type in all {
+            let rel = Relationship::new(from, to, rel_type, test_chain());
+            assert_eq!(rel.rel_type, rel_type);
+            assert_eq!(rel.from, from);
+            assert_eq!(rel.to, to);
+        }
+    }
+
+    #[test]
+    fn test_relationship_active_on_date_boundaries() {
+        let from = EntityId::new();
+        let to = EntityId::new();
+        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+        let rel = Relationship::new(from, to, RelationshipType::HoldsPosition, test_chain())
+            .with_dates(start, Some(end));
+
+        assert!(rel.active_on(start));
+        assert!(rel.active_on(end));
+    }
+
+    #[test]
+    fn test_relationship_with_dates_sets_fields() {
+        let from = EntityId::new();
+        let to = EntityId::new();
+        let start = NaiveDate::from_ymd_opt(2023, 6, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
+        let rel = Relationship::new(from, to, RelationshipType::NamedIn, test_chain())
+            .with_dates(start, Some(end));
+
+        assert_eq!(rel.start_date, Some(start));
+        assert_eq!(rel.end_date, Some(end));
+    }
 }

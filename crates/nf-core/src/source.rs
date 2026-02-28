@@ -232,4 +232,73 @@ mod tests {
         assert_eq!(chain.source_count(), 2);
         assert_eq!(chain.all_urls().len(), 2);
     }
+
+    #[test]
+    fn test_source_ref_new_defaults() {
+        let url = Url::parse("https://www.fec.gov/data/").unwrap();
+        let source = SourceRef::new(
+            url.clone(),
+            ContentHash::compute(b"fec source"),
+            SourceType::FecFiling,
+            "analyst",
+        );
+
+        assert_eq!(source.source_url, url);
+        assert_eq!(source.source_type, SourceType::FecFiling);
+        assert_eq!(source.submitted_by, "analyst");
+        assert!(source.archive_url.is_none());
+        assert!(source.filing_id.is_none());
+        assert!(source.reference_detail.is_none());
+    }
+
+    #[test]
+    fn test_source_ref_with_reference_detail_and_filing_id() {
+        let source = SourceRef::new(
+            Url::parse("https://example.org/source").unwrap(),
+            ContentHash::compute(b"payload"),
+            SourceType::PressRelease,
+            "system",
+        )
+        .with_reference_detail("Section 2, paragraph 4")
+        .with_filing_id("DOC-2026-07");
+
+        assert_eq!(
+            source.reference_detail.as_deref(),
+            Some("Section 2, paragraph 4")
+        );
+        assert_eq!(source.filing_id.as_deref(), Some("DOC-2026-07"));
+    }
+
+    #[test]
+    fn test_source_chain_all_urls_and_source_count() {
+        let primary = SourceRef::new(
+            Url::parse("https://primary.example").unwrap(),
+            ContentHash::compute(b"primary"),
+            SourceType::GovernmentWebsite,
+            "system",
+        );
+        let supporting_a = SourceRef::new(
+            Url::parse("https://support-a.example").unwrap(),
+            ContentHash::compute(b"a"),
+            SourceType::PublicStatement,
+            "system",
+        );
+        let supporting_b = SourceRef::new(
+            Url::parse("https://support-b.example").unwrap(),
+            ContentHash::compute(b"b"),
+            SourceType::CourtRecord,
+            "system",
+        );
+
+        let mut chain = SourceChain::new(primary);
+        chain.add_supporting(supporting_a);
+        chain.add_supporting(supporting_b);
+
+        let urls = chain.all_urls();
+        assert_eq!(chain.source_count(), 3);
+        assert_eq!(urls.len(), 3);
+        assert_eq!(urls[0].as_str(), "https://primary.example/");
+        assert_eq!(urls[1].as_str(), "https://support-a.example/");
+        assert_eq!(urls[2].as_str(), "https://support-b.example/");
+    }
 }

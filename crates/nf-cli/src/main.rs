@@ -43,6 +43,9 @@ enum Command {
 
     /// Show database and index statistics.
     Status,
+
+    /// Rebuild the Tantivy search index from the database.
+    Reindex,
 }
 
 #[tokio::main]
@@ -62,6 +65,7 @@ async fn main() -> Result<()> {
         Command::Migrate => cmd_migrate(cfg).await,
         Command::VerifyAudit => cmd_verify_audit(cfg).await,
         Command::Status => cmd_status(cfg).await,
+        Command::Reindex => cmd_reindex(cfg).await,
     }
 }
 
@@ -224,6 +228,64 @@ async fn cmd_status(cfg: Config) -> Result<()> {
     );
     println!("  Search index:   {}", cfg.tantivy_dir);
 
+    pool.close().await;
+    Ok(())
+}
+
+/// Rebuild the Tantivy search index from all entities in the database.
+async fn cmd_reindex(cfg: Config) -> Result<()> {
+    let pool = nf_store::db::connect(&cfg.database_url)
+        .await
+        .context("failed to connect to database")?;
+    nf_store::migration::run(&pool).await?;
+
+    let search_schema = Arc::new(nf_search::NfSchema::build());
+    let index_dir = if cfg.tantivy_dir == "ram" {
+        nf_search::IndexDirectory::Ram
+    } else {
+        let path = PathBuf::from(&cfg.tantivy_dir);
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("failed to create tantivy dir: {}", path.display()))?;
+        nf_search::IndexDirectory::Mmap(path)
+    };
+    let index = nf_search::open_or_create_index(&search_schema, index_dir)
+        .context("failed to open tantivy index")?;
+
+    let mut indexer = nf_search::EntityIndexer::new(&index, search_schema)
+        .map_err(|e| anyhow::anyhow!("failed to create indexer: {e}"))?;
+
+    let repo = nf_store::repository::EntityRepository::new(pool.clone());
+
+    use nf_store::repository::Repository;
+    let mut page = 0u32;
+    let page_size = 500u32;
+    let mut total_indexed = 0usize;
+
+    loop {
+        let result = repo.list(page, page_size).await?;
+        if result.items.is_empty() {
+            break;
+        }
+
+        let batch_size = result.items.len();
+        indexer
+            .index_entities(&result.items)
+            .map_err(|e| anyhow::anyhow!("indexing error: {e}"))?;
+
+        total_indexed += batch_size;
+        tracing::info!(page, batch_size, total_indexed, "indexed batch");
+
+        if (page + 1) as i64 >= result.total_pages() as i64 {
+            break;
+        }
+        page += 1;
+    }
+
+    indexer
+        .commit()
+        .map_err(|e| anyhow::anyhow!("commit error: {e}"))?;
+
+    tracing::info!(total_indexed, "reindex complete");
     pool.close().await;
     Ok(())
 }

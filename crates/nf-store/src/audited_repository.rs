@@ -193,7 +193,6 @@ impl Repository<Relationship> for AuditedRelationshipRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::GENESIS_HASH;
 
     // Pure unit tests (no DB) — verify the wrappers compile and types are correct.
 

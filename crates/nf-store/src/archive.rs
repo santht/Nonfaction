@@ -343,4 +343,40 @@ mod tests {
             Err(StoreError::NotFound(_))
         ));
     }
+
+    #[test]
+    fn test_merkle_node_round_trip_metadata() {
+        let (_dir, archive) = tmp_archive();
+        let leaf = archive.store_node(&[], Some(b"payload")).unwrap();
+        let loaded = archive.get_node(&leaf.hash).unwrap();
+
+        assert_eq!(loaded.hash, leaf.hash);
+        assert_eq!(loaded.children, leaf.children);
+        assert_eq!(loaded.has_data, leaf.has_data);
+    }
+
+    #[test]
+    fn test_merkle_internal_node_without_data() {
+        let (_dir, archive) = tmp_archive();
+        let left = archive.store_node(&[], Some(b"left-data")).unwrap();
+        let right = archive.store_node(&[], Some(b"right-data")).unwrap();
+        let root = archive
+            .store_node(&[left.hash.clone(), right.hash.clone()], None)
+            .unwrap();
+
+        assert!(!root.has_data);
+        assert_eq!(root.children.len(), 2);
+        assert!(archive.verify_dag(&root.hash).unwrap());
+    }
+
+    #[test]
+    fn test_merkle_verify_dag_detects_tampered_data_blob() {
+        let (_dir, archive) = tmp_archive();
+        let leaf = archive.store_node(&[], Some(b"clean-data")).unwrap();
+
+        let data_path = archive.merkle_data_path(&leaf.hash);
+        fs::write(data_path, b"tampered-data").unwrap();
+
+        assert!(!archive.verify_dag(&leaf.hash).unwrap());
+    }
 }

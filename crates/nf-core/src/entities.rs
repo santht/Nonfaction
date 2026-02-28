@@ -572,4 +572,327 @@ mod tests {
         assert_eq!(pardon.days_indictment_to_pardon, Some(219));
         assert!(pardon.concurrent_business_relationship);
     }
+
+    fn assert_entity_common(entity: &Entity, expected_type: &str, expected_id: EntityId) {
+        assert_eq!(entity.type_name(), expected_type);
+        assert_eq!(entity.entity_id(), expected_id);
+        assert_eq!(entity.sources().source_count(), 1);
+    }
+
+    #[test]
+    fn test_entity_person_fields() {
+        let mut person = Person::new("Alex Doe", test_source_chain());
+        person.aliases = vec!["A. Doe".to_string()];
+        person.current_role = Some("Senator".to_string());
+        person.party_affiliation = Some(Party::Independent);
+        person.jurisdiction = Some(Jurisdiction::Federal);
+        person.status = PersonStatus::Former;
+        person.birth_date = Some(NaiveDate::from_ymd_opt(1970, 5, 3).unwrap());
+
+        assert_eq!(person.name, "Alex Doe");
+        assert_eq!(person.aliases, vec!["A. Doe"]);
+        assert_eq!(person.current_role.as_deref(), Some("Senator"));
+        assert_eq!(person.party_affiliation, Some(Party::Independent));
+        assert_eq!(person.jurisdiction, Some(Jurisdiction::Federal));
+        assert_eq!(person.status, PersonStatus::Former);
+        assert_eq!(
+            person.birth_date,
+            Some(NaiveDate::from_ymd_opt(1970, 5, 3).unwrap())
+        );
+
+        let id = person.meta.id;
+        let entity = Entity::Person(person);
+        assert_entity_common(&entity, "Person", id);
+    }
+
+    #[test]
+    fn test_entity_organization_fields() {
+        let known = EntityId::new();
+        let mut org = Organization::new(
+            "Accountability PAC",
+            OrganizationType::SuperPac,
+            test_source_chain(),
+        );
+        org.aliases = vec!["APAC".to_string()];
+        org.jurisdiction = Some(Jurisdiction::State("NY".to_string()));
+        org.known_principals = vec![known];
+        org.foreign_connection = true;
+
+        assert_eq!(org.name, "Accountability PAC");
+        assert_eq!(org.aliases, vec!["APAC"]);
+        assert_eq!(org.org_type, OrganizationType::SuperPac);
+        assert_eq!(org.jurisdiction, Some(Jurisdiction::State("NY".to_string())));
+        assert_eq!(org.known_principals, vec![known]);
+        assert!(org.foreign_connection);
+
+        let id = org.meta.id;
+        let entity = Entity::Organization(org);
+        assert_entity_common(&entity, "Organization", id);
+    }
+
+    #[test]
+    fn test_entity_document_fields() {
+        let date = NaiveDate::from_ymd_opt(2024, 2, 14).unwrap();
+        let doc = Document {
+            meta: EntityMeta::new(test_source_chain()),
+            title: "Campaign Filing".to_string(),
+            document_type: DocumentType::FecFiling,
+            content: Some("Filed report summary".to_string()),
+            file_hash: "abc123".to_string(),
+            filename: Some("filing.pdf".to_string()),
+            mime_type: Some("application/pdf".to_string()),
+            page_count: Some(42),
+            date: Some(date),
+        };
+
+        assert_eq!(doc.title, "Campaign Filing");
+        assert_eq!(doc.document_type, DocumentType::FecFiling);
+        assert_eq!(doc.content.as_deref(), Some("Filed report summary"));
+        assert_eq!(doc.file_hash, "abc123");
+        assert_eq!(doc.filename.as_deref(), Some("filing.pdf"));
+        assert_eq!(doc.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(doc.page_count, Some(42));
+        assert_eq!(doc.date, Some(date));
+
+        let id = doc.meta.id;
+        let entity = Entity::Document(doc);
+        assert_entity_common(&entity, "Document", id);
+    }
+
+    #[test]
+    fn test_entity_payment_fields() {
+        let donor = EntityId::new();
+        let recipient = EntityId::new();
+        let date = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+        let payment = Payment {
+            meta: EntityMeta::new(test_source_chain()),
+            amount: 1_000_000.0,
+            currency: "USD".to_string(),
+            date,
+            donor,
+            recipient,
+            payment_type: PaymentType::GovernmentContract,
+            filing_id: Some("FEC-999".to_string()),
+            election_cycle: Some("2024".to_string()),
+            description: Some("General election media buy".to_string()),
+        };
+
+        assert_eq!(payment.amount, 1_000_000.0);
+        assert_eq!(payment.currency, "USD");
+        assert_eq!(payment.date, date);
+        assert_eq!(payment.donor, donor);
+        assert_eq!(payment.recipient, recipient);
+        assert_eq!(payment.payment_type, PaymentType::GovernmentContract);
+        assert_eq!(payment.filing_id.as_deref(), Some("FEC-999"));
+        assert_eq!(payment.election_cycle.as_deref(), Some("2024"));
+        assert_eq!(
+            payment.description.as_deref(),
+            Some("General election media buy")
+        );
+
+        let id = payment.meta.id;
+        let entity = Entity::Payment(payment);
+        assert_entity_common(&entity, "Payment", id);
+    }
+
+    #[test]
+    fn test_entity_court_case_fields() {
+        let plaintiff = EntityId::new();
+        let defendant = EntityId::new();
+        let case = CourtCase {
+            meta: EntityMeta::new(test_source_chain()),
+            case_id: "1:24-cv-12345".to_string(),
+            court: "S.D.N.Y.".to_string(),
+            case_type: CaseType::Civil,
+            parties: vec![
+                CaseParty {
+                    entity_id: plaintiff,
+                    role: CasePartyRole::Plaintiff,
+                },
+                CaseParty {
+                    entity_id: defendant,
+                    role: CasePartyRole::Defendant,
+                },
+            ],
+            outcome: Some("Settled".to_string()),
+            filing_date: Some(NaiveDate::from_ymd_opt(2024, 1, 2).unwrap()),
+            disposition_date: Some(NaiveDate::from_ymd_opt(2024, 7, 2).unwrap()),
+        };
+
+        assert_eq!(case.case_id, "1:24-cv-12345");
+        assert_eq!(case.court, "S.D.N.Y.");
+        assert_eq!(case.case_type, CaseType::Civil);
+        assert_eq!(case.parties.len(), 2);
+        assert_eq!(case.parties[0].entity_id, plaintiff);
+        assert_eq!(case.parties[0].role, CasePartyRole::Plaintiff);
+        assert_eq!(case.parties[1].entity_id, defendant);
+        assert_eq!(case.parties[1].role, CasePartyRole::Defendant);
+        assert_eq!(case.outcome.as_deref(), Some("Settled"));
+
+        let id = case.meta.id;
+        let entity = Entity::CourtCase(case);
+        assert_entity_common(&entity, "CourtCase", id);
+    }
+
+    #[test]
+    fn test_entity_pardon_fields() {
+        let pardoned = EntityId::new();
+        let official = EntityId::new();
+        let pardon = Pardon {
+            meta: EntityMeta::new(test_source_chain()),
+            person_pardoned: pardoned,
+            pardoning_official: official,
+            offense: "Tax fraud".to_string(),
+            sentence_at_time: Some("5 years".to_string()),
+            pardon_date: NaiveDate::from_ymd_opt(2025, 1, 20).unwrap(),
+            indictment_date: Some(NaiveDate::from_ymd_opt(2023, 1, 20).unwrap()),
+            days_indictment_to_pardon: Some(731),
+            concurrent_business_relationship: false,
+        };
+
+        assert_eq!(pardon.person_pardoned, pardoned);
+        assert_eq!(pardon.pardoning_official, official);
+        assert_eq!(pardon.offense, "Tax fraud");
+        assert_eq!(pardon.sentence_at_time.as_deref(), Some("5 years"));
+        assert_eq!(pardon.days_indictment_to_pardon, Some(731));
+        assert!(!pardon.concurrent_business_relationship);
+
+        let id = pardon.meta.id;
+        let entity = Entity::Pardon(pardon);
+        assert_entity_common(&entity, "Pardon", id);
+    }
+
+    #[test]
+    fn test_entity_flight_log_entry_fields() {
+        let p1 = EntityId::new();
+        let p2 = EntityId::new();
+        let entry = FlightLogEntry {
+            meta: EntityMeta::new(test_source_chain()),
+            aircraft_tail_number: "N12345".to_string(),
+            date: NaiveDate::from_ymd_opt(2024, 8, 8).unwrap(),
+            origin: Some("KJFK".to_string()),
+            destination: Some("KMIA".to_string()),
+            passengers: vec![p1, p2],
+        };
+
+        assert_eq!(entry.aircraft_tail_number, "N12345");
+        assert_eq!(entry.origin.as_deref(), Some("KJFK"));
+        assert_eq!(entry.destination.as_deref(), Some("KMIA"));
+        assert_eq!(entry.passengers, vec![p1, p2]);
+
+        let id = entry.meta.id;
+        let entity = Entity::FlightLogEntry(entry);
+        assert_entity_common(&entity, "FlightLogEntry", id);
+    }
+
+    #[test]
+    fn test_entity_timing_correlation_fields() {
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let correlation = TimingCorrelation {
+            meta: EntityMeta::new(test_source_chain()),
+            event_a: a,
+            event_a_description: "Donation".to_string(),
+            event_a_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            event_b: b,
+            event_b_description: "Vote".to_string(),
+            event_b_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            days_between: 31,
+            correlation_type: CorrelationType::DonationToVote,
+            auto_flagged: true,
+            threshold_days: Some(90),
+        };
+
+        assert_eq!(correlation.event_a, a);
+        assert_eq!(correlation.event_b, b);
+        assert_eq!(correlation.days_between, 31);
+        assert_eq!(correlation.correlation_type, CorrelationType::DonationToVote);
+        assert!(correlation.auto_flagged);
+        assert_eq!(correlation.threshold_days, Some(90));
+
+        let id = correlation.meta.id;
+        let entity = Entity::TimingCorrelation(correlation);
+        assert_entity_common(&entity, "TimingCorrelation", id);
+    }
+
+    #[test]
+    fn test_entity_conduct_comparison_fields() {
+        let official = EntityId::new();
+        let comparison = ConductComparison {
+            meta: EntityMeta::new(test_source_chain()),
+            official_action: "Awarded contract after donation".to_string(),
+            official,
+            action_date: NaiveDate::from_ymd_opt(2024, 4, 10).unwrap(),
+            action_source: "Contract records".to_string(),
+            equivalent_private_conduct: "Kickback".to_string(),
+            documented_consequence: "Prosecution".to_string(),
+            consequence_source: "DOJ press release".to_string(),
+        };
+
+        assert_eq!(comparison.official, official);
+        assert_eq!(comparison.official_action, "Awarded contract after donation");
+        assert_eq!(comparison.action_source, "Contract records");
+        assert_eq!(comparison.equivalent_private_conduct, "Kickback");
+        assert_eq!(comparison.documented_consequence, "Prosecution");
+        assert_eq!(comparison.consequence_source, "DOJ press release");
+
+        let id = comparison.meta.id;
+        let entity = Entity::ConductComparison(comparison);
+        assert_entity_common(&entity, "ConductComparison", id);
+    }
+
+    #[test]
+    fn test_entity_public_statement_fields() {
+        let official = EntityId::new();
+        let beneficiary = EntityId::new();
+        let statement = PublicStatement {
+            meta: EntityMeta::new(test_source_chain()),
+            official,
+            date: NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+            platform: StatementPlatform::Interview,
+            content_summary: "Publicly praised contractor".to_string(),
+            topic_tags: vec!["contracting".to_string(), "oversight".to_string()],
+            beneficiary_tags: vec![beneficiary],
+        };
+
+        assert_eq!(statement.official, official);
+        assert_eq!(statement.platform, StatementPlatform::Interview);
+        assert_eq!(statement.content_summary, "Publicly praised contractor");
+        assert_eq!(
+            statement.topic_tags,
+            vec!["contracting".to_string(), "oversight".to_string()]
+        );
+        assert_eq!(statement.beneficiary_tags, vec![beneficiary]);
+
+        let id = statement.meta.id;
+        let entity = Entity::PublicStatement(statement);
+        assert_entity_common(&entity, "PublicStatement", id);
+    }
+
+    #[test]
+    fn test_entity_policy_decision_fields() {
+        let official = EntityId::new();
+        let beneficiary = EntityId::new();
+        let decision = PolicyDecision {
+            meta: EntityMeta::new(test_source_chain()),
+            official,
+            date: NaiveDate::from_ymd_opt(2024, 11, 5).unwrap(),
+            description: "Voted for appropriations rider".to_string(),
+            decision_type: PolicyDecisionType::LegislativeVote,
+            beneficiaries: vec![beneficiary],
+            reference_number: Some("HR-2024-551".to_string()),
+            vote: Some(VotePosition::Yea),
+        };
+
+        assert_eq!(decision.official, official);
+        assert_eq!(decision.description, "Voted for appropriations rider");
+        assert_eq!(decision.decision_type, PolicyDecisionType::LegislativeVote);
+        assert_eq!(decision.beneficiaries, vec![beneficiary]);
+        assert_eq!(decision.reference_number.as_deref(), Some("HR-2024-551"));
+        assert_eq!(decision.vote, Some(VotePosition::Yea));
+
+        let id = decision.meta.id;
+        let entity = Entity::PolicyDecision(decision);
+        assert_entity_common(&entity, "PolicyDecision", id);
+    }
 }

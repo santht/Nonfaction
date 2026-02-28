@@ -265,6 +265,32 @@ fn row_to_entry(row: sqlx::postgres::PgRow) -> Result<AuditEntry, StoreError> {
 mod tests {
     use super::*;
 
+    fn compute_hash_for_entry(entry: &AuditEntry) -> String {
+        compute_entry_hash(
+            entry.id,
+            &entry.timestamp,
+            entry.operation,
+            &entry.entity_type,
+            entry.entity_id,
+            &entry.data_hash,
+            &entry.prev_hash,
+        )
+    }
+
+    fn verify_hash_chain(entries: &[AuditEntry]) -> bool {
+        let mut expected_prev = GENESIS_HASH.to_string();
+        for entry in entries {
+            if entry.prev_hash != expected_prev {
+                return false;
+            }
+            if compute_hash_for_entry(entry) != entry.entry_hash {
+                return false;
+            }
+            expected_prev = entry.entry_hash.clone();
+        }
+        true
+    }
+
     // ── Pure / no-DB tests ───────────────────────────────────────────────────
 
     #[test]
@@ -369,6 +395,150 @@ mod tests {
         assert_eq!(AuditOperation::Insert.to_string(), "Insert");
         assert_eq!(AuditOperation::Update.to_string(), "Update");
         assert_eq!(AuditOperation::Delete.to_string(), "Delete");
+    }
+
+    #[test]
+    fn test_audit_operation_as_str_variants() {
+        assert_eq!(AuditOperation::Insert.as_str(), "Insert");
+        assert_eq!(AuditOperation::Update.as_str(), "Update");
+        assert_eq!(AuditOperation::Delete.as_str(), "Delete");
+    }
+
+    #[test]
+    fn test_audit_entry_compute_hash_consistency() {
+        let entry = AuditEntry {
+            id: Uuid::new_v4(),
+            seq: 1,
+            timestamp: Utc::now(),
+            operation: AuditOperation::Insert,
+            entity_type: "Person".to_string(),
+            entity_id: Uuid::new_v4(),
+            data_hash: "abc123".to_string(),
+            prev_hash: GENESIS_HASH.to_string(),
+            entry_hash: String::new(),
+        };
+        let h1 = compute_hash_for_entry(&entry);
+        let h2 = compute_entry_hash(
+            entry.id,
+            &entry.timestamp,
+            entry.operation,
+            &entry.entity_type,
+            entry.entity_id,
+            &entry.data_hash,
+            &entry.prev_hash,
+        );
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64);
+    }
+
+    #[test]
+    fn test_audit_hash_chain_unit_valid_sequence() {
+        let eid = Uuid::new_v4();
+        let ts = Utc::now();
+
+        let e1 = AuditEntry {
+            id: Uuid::new_v4(),
+            seq: 1,
+            timestamp: ts,
+            operation: AuditOperation::Insert,
+            entity_type: "Payment".to_string(),
+            entity_id: eid,
+            data_hash: "d1".to_string(),
+            prev_hash: GENESIS_HASH.to_string(),
+            entry_hash: String::new(),
+        };
+        let e1_hash = compute_hash_for_entry(&e1);
+        let e1 = AuditEntry {
+            entry_hash: e1_hash.clone(),
+            ..e1
+        };
+
+        let e2 = AuditEntry {
+            id: Uuid::new_v4(),
+            seq: 2,
+            timestamp: ts,
+            operation: AuditOperation::Update,
+            entity_type: "Payment".to_string(),
+            entity_id: eid,
+            data_hash: "d2".to_string(),
+            prev_hash: e1_hash,
+            entry_hash: String::new(),
+        };
+        let e2_hash = compute_hash_for_entry(&e2);
+        let e2 = AuditEntry {
+            entry_hash: e2_hash,
+            ..e2
+        };
+
+        assert!(verify_hash_chain(&[e1, e2]));
+    }
+
+    #[test]
+    fn test_audit_hash_chain_detects_prev_hash_break() {
+        let ts = Utc::now();
+        let eid = Uuid::new_v4();
+        let e1 = AuditEntry {
+            id: Uuid::new_v4(),
+            seq: 1,
+            timestamp: ts,
+            operation: AuditOperation::Insert,
+            entity_type: "Person".to_string(),
+            entity_id: eid,
+            data_hash: "d1".to_string(),
+            prev_hash: GENESIS_HASH.to_string(),
+            entry_hash: String::new(),
+        };
+        let e1 = AuditEntry {
+            entry_hash: compute_hash_for_entry(&e1),
+            ..e1
+        };
+        let e2 = AuditEntry {
+            id: Uuid::new_v4(),
+            seq: 2,
+            timestamp: ts,
+            operation: AuditOperation::Delete,
+            entity_type: "Person".to_string(),
+            entity_id: eid,
+            data_hash: "d2".to_string(),
+            prev_hash: "bad_prev".to_string(),
+            entry_hash: "invalid".to_string(),
+        };
+
+        assert!(!verify_hash_chain(&[e1, e2]));
+    }
+
+    #[test]
+    fn test_audit_hash_chain_detects_entry_hash_tamper() {
+        let ts = Utc::now();
+        let eid = Uuid::new_v4();
+        let e1 = AuditEntry {
+            id: Uuid::new_v4(),
+            seq: 1,
+            timestamp: ts,
+            operation: AuditOperation::Insert,
+            entity_type: "Organization".to_string(),
+            entity_id: eid,
+            data_hash: "d1".to_string(),
+            prev_hash: GENESIS_HASH.to_string(),
+            entry_hash: String::new(),
+        };
+        let e1 = AuditEntry {
+            entry_hash: compute_hash_for_entry(&e1),
+            ..e1
+        };
+        let e2 = AuditEntry {
+            id: Uuid::new_v4(),
+            seq: 2,
+            timestamp: ts,
+            operation: AuditOperation::Update,
+            entity_type: "Organization".to_string(),
+            entity_id: eid,
+            data_hash: "d2".to_string(),
+            prev_hash: e1.entry_hash.clone(),
+            entry_hash: "0".repeat(64),
+        };
+
+        assert!(!verify_hash_chain(&[e1, e2]));
     }
 
     // ── DB-dependent tests (skipped without DATABASE_URL) ────────────────────
