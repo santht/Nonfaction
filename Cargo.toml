@@ -1,0 +1,85 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nf-core",
+    "crates/nf-store",
+    "crates/nf-ingest",
+    "crates/nf-scrape",
+    "crates/nf-search",
+    "crates/nf-graph",
+    "crates/nf-api",
+    "crates/nf-crowd",
+    "crates/nf-verify",
+    "crates/nf-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+repository = "https://github.com/nonfaction/nonfaction"
+description = "Transparent, open source, crowdsourced political accountability database"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-full"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }
+
+# Search
+tantivy = "0.22"
+
+# Graph
+petgraph = "0.7"
+
+# Crypto / hashing
+sha2 = "0.10"
+blake3 = "1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# IDs
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+ulid = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# HTML parsing / scraping
+scraper = "0.22"
+select = "0.6"
+
+# PDF extraction
+pdf-extract = "0.7"
+lopdf = "0.34"
+
+# URL handling
+url = { version = "2", features = ["serde"] }
+
+# Config
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# Testing
+assert_matches = "1"
+tempfile = "3"
+wiremock = "0.6"

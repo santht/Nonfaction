@@ -1,0 +1,21 @@
+[package]
+name = "nf-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Auto-verification — check filing IDs against source APIs, validate URLs"
+
+[dependencies]
+nf-core = { path = "../nf-core" }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert_matches = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }

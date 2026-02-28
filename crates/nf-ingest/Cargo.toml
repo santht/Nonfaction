@@ -1,0 +1,20 @@
+[package]
+name = "nf-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Document ingestion — PDF extraction, OCR, CSV, HTML, table extraction"
+
+[dependencies]
+nf-core = { path = "../nf-core" }
+pdf-extract = { workspace = true }
+lopdf = { workspace = true }
+scraper = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert_matches = { workspace = true }
+tempfile = { workspace = true }

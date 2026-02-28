@@ -1,0 +1,20 @@
+[package]
+name = "nf-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Graph engine — petgraph, timing analysis, correlation calculator, path finding"
+
+[dependencies]
+nf-core = { path = "../nf-core" }
+petgraph = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert_matches = { workspace = true }
+tempfile = { workspace = true }

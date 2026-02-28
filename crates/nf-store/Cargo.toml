@@ -1,0 +1,23 @@
+[package]
+name = "nf-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PostgreSQL storage, content-addressable document archive, Merkle DAG"
+
+[dependencies]
+nf-core = { path = "../nf-core" }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert_matches = { workspace = true }
+tempfile = { workspace = true }

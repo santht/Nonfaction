@@ -1,0 +1,22 @@
+[package]
+name = "nf-crowd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Crowdsource — submission queue, review workflow, reputation, sybil detection"
+
+[dependencies]
+nf-core = { path = "../nf-core" }
+nf-store = { path = "../nf-store" }
+nf-verify = { path = "../nf-verify" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert_matches = { workspace = true }
+tempfile = { workspace = true }
