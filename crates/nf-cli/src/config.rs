@@ -2,6 +2,7 @@ use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
 };
+use nf_scrape::ScraperConfig;
 use serde::{Deserialize, Serialize};
 
 /// Application configuration, loaded from (in order of precedence):
@@ -33,6 +34,10 @@ pub struct Config {
     /// Maximum database connection pool size.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+
+    /// Scraper source settings and credentials.
+    #[serde(default = "default_scraper")]
+    pub scraper: ScraperConfig,
 }
 
 fn default_database_url() -> String {
@@ -59,6 +64,10 @@ fn default_max_connections() -> u32 {
     20
 }
 
+fn default_scraper() -> ScraperConfig {
+    ScraperConfig::default()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -68,6 +77,7 @@ impl Default for Config {
             log_level: default_log_level(),
             archive_dir: default_archive_dir(),
             max_connections: default_max_connections(),
+            scraper: default_scraper(),
         }
     }
 }

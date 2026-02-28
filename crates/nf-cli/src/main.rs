@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -46,6 +47,20 @@ enum Command {
 
     /// Rebuild the Tantivy search index from the database.
     Reindex,
+
+    /// Run all registered scrapers and index results into Tantivy.
+    Scrape,
+
+    /// Ingest one local document through the extraction pipeline.
+    Ingest {
+        /// Path to the input file.
+        #[arg(long, short)]
+        path: PathBuf,
+
+        /// MIME type (e.g. application/pdf, text/html, text/plain).
+        #[arg(long, short = 'm')]
+        mime_type: String,
+    },
 }
 
 #[tokio::main]
@@ -66,6 +81,8 @@ async fn main() -> Result<()> {
         Command::VerifyAudit => cmd_verify_audit(cfg).await,
         Command::Status => cmd_status(cfg).await,
         Command::Reindex => cmd_reindex(cfg).await,
+        Command::Scrape => cmd_scrape(cfg).await,
+        Command::Ingest { path, mime_type } => cmd_ingest(path, mime_type).await,
     }
 }
 
@@ -288,4 +305,137 @@ async fn cmd_reindex(cfg: Config) -> Result<()> {
     tracing::info!(total_indexed, "reindex complete");
     pool.close().await;
     Ok(())
+}
+
+/// Run all registered scrapers and index the scraped entities.
+async fn cmd_scrape(cfg: Config) -> Result<()> {
+    let started_at = Instant::now();
+
+    tracing::info!("connecting to database...");
+    let pool = nf_store::db::connect_with(&cfg.database_url, cfg.max_connections)
+        .await
+        .context("failed to connect to database")?;
+    nf_store::migration::run(&pool)
+        .await
+        .context("failed to run migrations")?;
+
+    let scraper_cfg = cfg.scraper.clone();
+    let runtime_cfg = combined_source_config(&scraper_cfg);
+    let runtime = nf_scrape::ScraperRuntime::new(&runtime_cfg);
+
+    let mut registry = nf_scrape::sources::SourceRegistry::new();
+    registry.register(Box::new(nf_scrape::sources::FecScraper::new(
+        scraper_cfg.fec.clone(),
+    )));
+    registry.register(Box::new(nf_scrape::sources::CongressScraper::new(
+        scraper_cfg.congress.clone(),
+    )));
+    registry.register(Box::new(nf_scrape::sources::RecapScraper::new(
+        scraper_cfg.recap.clone(),
+    )));
+    registry.register(Box::new(
+        nf_scrape::sources::OpenSecretsFecBulkScraper::new(scraper_cfg.opensecrets_fec_bulk),
+    ));
+    registry.register(Box::new(nf_scrape::sources::PacerScraper::new(
+        scraper_cfg.pacer,
+    )));
+
+    tracing::info!(sources = registry.source_count(), "running all scrapers");
+    let entities = registry
+        .scrape_all(&runtime)
+        .await
+        .map_err(|e| anyhow::anyhow!("scrape failed: {e}"))?;
+    let scraped_count = entities.len();
+
+    let search_schema = Arc::new(nf_search::NfSchema::build());
+    let index_dir = if cfg.tantivy_dir == "ram" {
+        nf_search::IndexDirectory::Ram
+    } else {
+        let path = PathBuf::from(&cfg.tantivy_dir);
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("failed to create tantivy dir: {}", path.display()))?;
+        nf_search::IndexDirectory::Mmap(path)
+    };
+    let index = nf_search::open_or_create_index(&search_schema, index_dir)
+        .context("failed to open tantivy index")?;
+
+    let mut indexer = nf_search::EntityIndexer::new(&index, search_schema)
+        .map_err(|e| anyhow::anyhow!("failed to create indexer: {e}"))?;
+    indexer
+        .index_entities(&entities)
+        .map_err(|e| anyhow::anyhow!("indexing error: {e}"))?;
+    indexer
+        .commit()
+        .map_err(|e| anyhow::anyhow!("commit error: {e}"))?;
+
+    let indexed_count = entities.len();
+    let elapsed = started_at.elapsed();
+    tracing::info!(
+        scraped_count,
+        indexed_count,
+        elapsed_secs = elapsed.as_secs_f64(),
+        "scrape + index complete"
+    );
+
+    pool.close().await;
+    Ok(())
+}
+
+/// Ingest one file and log a short extraction summary.
+async fn cmd_ingest(path: PathBuf, mime_type: String) -> Result<()> {
+    let started_at = Instant::now();
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("failed to read input file: {}", path.display()))?;
+
+    let output = nf_ingest::ingest(&bytes, &mime_type)
+        .map_err(|e| anyhow::anyhow!("ingest failed for {}: {e}", path.display()))?;
+
+    let text_length = output.content.text().len();
+    let page_count = output.content.page_count().unwrap_or(0);
+    let table_count = output.content.tables().len();
+    let elapsed = started_at.elapsed();
+
+    tracing::info!(
+        path = %path.display(),
+        mime_type = %output.metadata.mime_type,
+        text_length,
+        page_count,
+        table_count,
+        elapsed_secs = elapsed.as_secs_f64(),
+        "ingest complete"
+    );
+
+    Ok(())
+}
+
+fn combined_source_config(cfg: &nf_scrape::ScraperConfig) -> nf_scrape::SourceConfig {
+    let all = [
+        &cfg.fec.source,
+        &cfg.congress.source,
+        &cfg.recap.source,
+        &cfg.opensecrets_fec_bulk.source,
+        &cfg.pacer.source,
+    ];
+
+    let mut requests_per_second = f64::MAX;
+    let mut burst_size = f64::MAX;
+    let mut max_retries = 0u32;
+    let mut retry_base_delay_ms = 0u64;
+    let mut scrape_interval_secs = u64::MAX;
+
+    for source in all {
+        requests_per_second = requests_per_second.min(source.requests_per_second);
+        burst_size = burst_size.min(source.burst_size);
+        max_retries = max_retries.max(source.max_retries);
+        retry_base_delay_ms = retry_base_delay_ms.max(source.retry_base_delay_ms);
+        scrape_interval_secs = scrape_interval_secs.min(source.scrape_interval_secs);
+    }
+
+    nf_scrape::SourceConfig {
+        requests_per_second,
+        burst_size,
+        max_retries,
+        retry_base_delay_ms,
+        scrape_interval_secs,
+    }
 }
