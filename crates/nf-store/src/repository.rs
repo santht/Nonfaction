@@ -162,6 +162,13 @@ const RELATIONSHIP_COUNT_SQL: &str = "SELECT COUNT(*) FROM relationships";
 const ENTITY_SEARCH_BY_JSONB_COUNT_SQL: &str = "SELECT COUNT(*) FROM entities WHERE data @> $1::jsonb";
 const ENTITY_SEARCH_BY_JSONB_LIST_SQL: &str =
     "SELECT data FROM entities WHERE data @> $1::jsonb ORDER BY created_at DESC LIMIT $2 OFFSET $3";
+const ENTITY_SEARCH_BY_TYPE_AND_VERSION_COUNT_SQL: &str =
+    "SELECT COUNT(*) FROM entities WHERE entity_type = $1 AND version >= $2";
+const ENTITY_SEARCH_BY_TYPE_AND_VERSION_LIST_SQL: &str =
+    "SELECT data FROM entities WHERE entity_type = $1 AND version >= $2 \
+     ORDER BY version DESC, updated_at DESC LIMIT $3 OFFSET $4";
+const ENTITY_LIST_RECENT_SQL: &str =
+    "SELECT data FROM entities ORDER BY updated_at DESC LIMIT $1";
 
 fn map_sqlx_write_error(err: sqlx::Error) -> StoreError {
     match &err {
@@ -314,6 +321,54 @@ impl EntityRepository {
 
         let items = deserialize_entity_rows(rows)?;
         Ok(Page::with_total(items, page, page_size, total_count))
+    }
+
+    /// Search entities filtered by entity type and a minimum version number.
+    ///
+    /// Returns all entities of the given type whose `version` is ≥ `min_version`,
+    /// ordered by version descending then by `updated_at` descending, with pagination.
+    pub async fn search_by_type_and_version(
+        &self,
+        entity_type: &str,
+        min_version: i64,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
+        let limit = page_size as i64;
+        let offset = (page as i64) * limit;
+
+        let (total_count,): (i64,) =
+            sqlx::query_as(ENTITY_SEARCH_BY_TYPE_AND_VERSION_COUNT_SQL)
+                .bind(entity_type)
+                .bind(min_version)
+                .fetch_one(&self.pool)
+                .await?;
+
+        let rows = sqlx::query(ENTITY_SEARCH_BY_TYPE_AND_VERSION_LIST_SQL)
+            .bind(entity_type)
+            .bind(min_version)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let items = deserialize_entity_rows(rows)?;
+        Ok(Page::with_total(items, page, page_size, total_count))
+    }
+
+    /// Return the N most recently updated entities across all types.
+    ///
+    /// Results are ordered by `updated_at` descending. `limit` caps the
+    /// number of rows returned; pass `0` to get an empty result.
+    pub async fn list_recent(&self, limit: u32) -> Result<Vec<Entity>, StoreError> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        let rows = sqlx::query(ENTITY_LIST_RECENT_SQL)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+        deserialize_entity_rows(rows)
     }
 
     // ── Convenience typed getters ────────────────────────────────────────────
@@ -1333,6 +1388,203 @@ mod tests {
         for id in &inserted_ids {
             repo.delete(*id).await.unwrap();
         }
+        pool.close().await;
+    }
+
+    // ── Tests for new query methods ───────────────────────────────────────────
+
+    // ── search_by_type_and_version SQL constant tests (no DB) ────────────────
+
+    #[test]
+    fn test_search_by_type_and_version_count_sql() {
+        assert_eq!(
+            ENTITY_SEARCH_BY_TYPE_AND_VERSION_COUNT_SQL,
+            "SELECT COUNT(*) FROM entities WHERE entity_type = $1 AND version >= $2"
+        );
+    }
+
+    #[test]
+    fn test_search_by_type_and_version_list_sql_contains_order_by() {
+        assert!(ENTITY_SEARCH_BY_TYPE_AND_VERSION_LIST_SQL.contains("ORDER BY version DESC"));
+        assert!(ENTITY_SEARCH_BY_TYPE_AND_VERSION_LIST_SQL.contains("entity_type = $1"));
+        assert!(ENTITY_SEARCH_BY_TYPE_AND_VERSION_LIST_SQL.contains("version >= $2"));
+    }
+
+    #[test]
+    fn test_list_recent_sql_orders_by_updated_at_desc() {
+        assert!(ENTITY_LIST_RECENT_SQL.contains("ORDER BY updated_at DESC"));
+        assert!(ENTITY_LIST_RECENT_SQL.contains("LIMIT $1"));
+    }
+
+    #[test]
+    fn test_list_recent_zero_limit_short_circuits() {
+        // The guard `if limit == 0 { return Ok(vec![]) }` means the result is
+        // always empty regardless of what is stored. Verify the SQL constant
+        // at least mentions LIMIT $1 so the guard is the only path for 0.
+        assert!(ENTITY_LIST_RECENT_SQL.contains("LIMIT $1"));
+    }
+
+    // ── DB-dependent tests for new methods ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_entity_count_reflects_inserted_rows() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let before = repo.count().await.unwrap();
+        let p = Person::new("Count Test", test_source_chain());
+        let id = p.meta.id.0;
+        repo.insert(&Entity::Person(p)).await.unwrap();
+
+        let after = repo.count().await.unwrap();
+        assert_eq!(after, before + 1);
+
+        repo.delete(id).await.unwrap();
+        let final_count = repo.count().await.unwrap();
+        assert_eq!(final_count, before);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_search_by_type_and_version_finds_matching() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let p = Person::new("TypeVer Test", test_source_chain());
+        let id = p.meta.id.0;
+        repo.insert(&Entity::Person(p)).await.unwrap();
+
+        let page = repo
+            .search_by_type_and_version("Person", 1, 0, 100)
+            .await
+            .unwrap();
+        assert!(page.items.iter().any(|e| entity_uuid(e) == id));
+        assert!(page.total_count >= 1);
+
+        repo.delete(id).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_search_by_type_and_version_excludes_lower_versions() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let p = Person::new("LowVer Test", test_source_chain());
+        let id = p.meta.id.0;
+        repo.insert(&Entity::Person(p)).await.unwrap();
+
+        let page = repo
+            .search_by_type_and_version("Person", 2, 0, 100)
+            .await
+            .unwrap();
+        assert!(!page.items.iter().any(|e| entity_uuid(e) == id));
+
+        repo.delete(id).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_search_by_type_and_version_wrong_type_returns_nothing() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let p = Person::new("WrongType Test", test_source_chain());
+        let id = p.meta.id.0;
+        repo.insert(&Entity::Person(p)).await.unwrap();
+
+        let page = repo
+            .search_by_type_and_version("Organization", 1, 0, 100)
+            .await
+            .unwrap();
+        assert!(!page.items.iter().any(|e| entity_uuid(e) == id));
+
+        repo.delete(id).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_search_by_type_and_version_paginates() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let mut ids = Vec::new();
+        for i in 0..4 {
+            let p = Person::new(format!("Paged TypeVer {i}"), test_source_chain());
+            ids.push(p.meta.id.0);
+            repo.insert(&Entity::Person(p)).await.unwrap();
+        }
+
+        let p0 = repo
+            .search_by_type_and_version("Person", 1, 0, 2)
+            .await
+            .unwrap();
+        let p1 = repo
+            .search_by_type_and_version("Person", 1, 1, 2)
+            .await
+            .unwrap();
+
+        assert_eq!(p0.page_size, 2);
+        assert!(p0.total_count >= 4);
+        assert!(p0.items.len() <= 2);
+        assert!(p1.items.len() <= 2);
+
+        for id in ids {
+            repo.delete(id).await.unwrap();
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_recent_returns_most_recently_updated() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let p1 = Person::new("Recent A", test_source_chain());
+        let p2 = Person::new("Recent B", test_source_chain());
+        let id1 = p1.meta.id.0;
+        let id2 = p2.meta.id.0;
+        repo.insert(&Entity::Person(p1)).await.unwrap();
+        repo.insert(&Entity::Person(p2)).await.unwrap();
+
+        let recent = repo.list_recent(5).await.unwrap();
+        assert!(!recent.is_empty());
+        assert!(recent.len() >= 2);
+
+        repo.delete(id1).await.unwrap();
+        repo.delete(id2).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_recent_respects_limit() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let p = Person::new(format!("Limit Test {i}"), test_source_chain());
+            ids.push(p.meta.id.0);
+            repo.insert(&Entity::Person(p)).await.unwrap();
+        }
+
+        let recent = repo.list_recent(3).await.unwrap();
+        assert!(recent.len() <= 3);
+
+        for id in ids {
+            repo.delete(id).await.unwrap();
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_recent_zero_limit_returns_empty() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let recent = repo.list_recent(0).await.unwrap();
+        assert!(recent.is_empty());
+
         pool.close().await;
     }
 }

@@ -59,6 +59,42 @@ pub fn to_dot(graph: &NfGraph) -> String {
     dot
 }
 
+/// Serialize `graph` to GraphML format (used by Gephi, yEd, and other tools).
+pub fn to_graphml(graph: &NfGraph) -> String {
+    let g = graph.inner();
+    let mut out = String::new();
+
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str("<graphml xmlns=\"http://graphml.graphdrawing.org/graphml\"\n");
+    out.push_str("         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n");
+    out.push_str("         xsi:schemaLocation=\"http://graphml.graphdrawing.org/graphml http://graphml.graphdrawing.org/graphml/graphml.xsd\">\n");
+    out.push_str("  <key id=\"relationship\" for=\"edge\" attr.name=\"relationship\" attr.type=\"string\"/>\n");
+    out.push_str("  <graph id=\"G\" edgedefault=\"directed\">\n");
+
+    for n in g.node_indices() {
+        let id = g.node_weight(n).unwrap();
+        out.push_str(&format!("    <node id=\"{}\"/>\n", id.0));
+    }
+
+    for (i, e) in g.edge_references().enumerate() {
+        let src = g.node_weight(e.source()).unwrap();
+        let tgt = g.node_weight(e.target()).unwrap();
+        out.push_str(&format!(
+            "    <edge id=\"e{}\" source=\"{}\" target=\"{}\">\n",
+            i, src.0, tgt.0
+        ));
+        out.push_str(&format!(
+            "      <data key=\"relationship\">{:?}</data>\n",
+            e.weight()
+        ));
+        out.push_str("    </edge>\n");
+    }
+
+    out.push_str("  </graph>\n");
+    out.push_str("</graphml>\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +170,81 @@ mod tests {
         // Should have an arrow between the two UUIDs
         let expected_edge = format!("\"{}\" -> \"{}\" [label=\"DonatedTo\"]", a.0, b.0);
         assert!(dot.contains(&expected_edge));
+    }
+
+    // ── to_graphml tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_graphml_empty_graph() {
+        let g = NfGraph::new();
+        let xml = to_graphml(&g);
+        assert!(xml.contains("<?xml version=\"1.0\""));
+        assert!(xml.contains("<graphml"));
+        assert!(xml.contains("edgedefault=\"directed\""));
+        assert!(!xml.contains("<node"));
+        assert!(!xml.contains("<edge"));
+    }
+
+    #[test]
+    fn test_graphml_contains_node_ids() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        g.add_node(a);
+        g.add_node(b);
+
+        let xml = to_graphml(&g);
+        assert!(xml.contains(&format!("<node id=\"{}\"/>", a.0)));
+        assert!(xml.contains(&format!("<node id=\"{}\"/>", b.0)));
+    }
+
+    #[test]
+    fn test_graphml_contains_edge_with_relationship() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+
+        let xml = to_graphml(&g);
+        assert!(xml.contains(&format!("source=\"{}\"", a.0)));
+        assert!(xml.contains(&format!("target=\"{}\"", b.0)));
+        assert!(xml.contains("DonatedTo"));
+    }
+
+    #[test]
+    fn test_graphml_relationship_key_declared() {
+        let g = NfGraph::new();
+        let xml = to_graphml(&g);
+        assert!(xml.contains("<key id=\"relationship\""));
+        assert!(xml.contains("attr.name=\"relationship\""));
+        assert!(xml.contains("attr.type=\"string\""));
+    }
+
+    #[test]
+    fn test_graphml_multiple_edges_indexed() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(b, c, RelationshipType::Pardoned);
+
+        let xml = to_graphml(&g);
+        assert!(xml.contains("id=\"e0\""));
+        assert!(xml.contains("id=\"e1\""));
+        assert!(xml.contains("DonatedTo"));
+        assert!(xml.contains("Pardoned"));
+    }
+
+    #[test]
+    fn test_graphml_graph_tag_closed() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+
+        let xml = to_graphml(&g);
+        assert!(xml.contains("</graph>"));
+        assert!(xml.contains("</graphml>"));
     }
 }

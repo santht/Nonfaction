@@ -48,6 +48,35 @@ fn re_org() -> &'static Regex {
     })
 }
 
+fn re_date() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // Matches:
+        // - January 15, 2024 / Jan. 15, 2024 / Jan 15, 2024
+        // - 01/15/2024
+        // - Q1 2024
+        // - FY2024 / FY 2024
+        Regex::new(
+            r"\b(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{4}|Q[1-4]\s+\d{4}|FY\s?\d{4})\b",
+        )
+        .unwrap()
+    })
+}
+
+fn re_filing_number() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // Matches:
+        // - FEC-2024-123
+        // - 24-cv-12345 / 24-cr-12345
+        // - H.R. 123 / S. 123 / H.Res. 123 / S.Res. 123
+        Regex::new(
+            r"\b(?:FEC-\d{4}-\d{3,}|\d{2}-(?:cv|cr)-\d{3,}|(?:H\.R\.|S\.|H\.Res\.|S\.Res\.)\s*\d+)\b",
+        )
+        .unwrap()
+    })
+}
+
 // ── public types ─────────────────────────────────────────────────────────────
 
 /// A single entity mention extracted from text
@@ -70,6 +99,10 @@ pub enum EntityKind {
     Organization,
     /// A monetary amount (e.g. "$1.2 million")
     MonetaryAmount,
+    /// A date mention (e.g. "January 15, 2024", "FY2024")
+    Date,
+    /// A filing or docket identifier (e.g. "FEC-2024-123")
+    FilingNumber,
 }
 
 /// All entities extracted from a single document
@@ -78,12 +111,18 @@ pub struct ExtractedEntities {
     pub people: Vec<EntityMention>,
     pub organizations: Vec<EntityMention>,
     pub amounts: Vec<EntityMention>,
+    pub dates: Vec<EntityMention>,
+    pub filing_numbers: Vec<EntityMention>,
 }
 
 impl ExtractedEntities {
     /// Total number of entity mentions across all categories
     pub fn total(&self) -> usize {
-        self.people.len() + self.organizations.len() + self.amounts.len()
+        self.people.len()
+            + self.organizations.len()
+            + self.amounts.len()
+            + self.dates.len()
+            + self.filing_numbers.len()
     }
 
     /// Iterate all entity mentions in document order
@@ -93,6 +132,8 @@ impl ExtractedEntities {
             .iter()
             .chain(self.organizations.iter())
             .chain(self.amounts.iter())
+            .chain(self.dates.iter())
+            .chain(self.filing_numbers.iter())
             .collect();
         all.sort_by_key(|e| e.offset);
         all
@@ -112,6 +153,8 @@ impl ExtractedEntities {
 /// Duplicate spans are de-duplicated (same start offset kept once).
 pub fn extract_entities(text: &str) -> ExtractedEntities {
     let amounts = extract_amounts(text);
+    let dates = extract_dates(text);
+    let filing_numbers = extract_filing_numbers(text);
     let amount_spans: Vec<(usize, usize)> = amounts
         .iter()
         .map(|e| (e.offset, e.offset + e.text.len()))
@@ -132,6 +175,8 @@ pub fn extract_entities(text: &str) -> ExtractedEntities {
         people,
         organizations,
         amounts,
+        dates,
+        filing_numbers,
     }
 }
 
@@ -162,6 +207,44 @@ fn extract_organizations(text: &str, blocked: &[(usize, usize)]) -> Vec<EntityMe
             Some(EntityMention {
                 text: m.as_str().trim().to_string(),
                 kind: EntityKind::Organization,
+                offset: start,
+            })
+        })
+        .collect()
+}
+
+fn extract_dates(text: &str) -> Vec<EntityMention> {
+    let mut seen_offsets = std::collections::HashSet::new();
+    re_date()
+        .find_iter(text)
+        .filter_map(|m| {
+            let start = m.start();
+            if seen_offsets.contains(&start) {
+                return None;
+            }
+            seen_offsets.insert(start);
+            Some(EntityMention {
+                text: m.as_str().trim().to_string(),
+                kind: EntityKind::Date,
+                offset: start,
+            })
+        })
+        .collect()
+}
+
+fn extract_filing_numbers(text: &str) -> Vec<EntityMention> {
+    let mut seen_offsets = std::collections::HashSet::new();
+    re_filing_number()
+        .find_iter(text)
+        .filter_map(|m| {
+            let start = m.start();
+            if seen_offsets.contains(&start) {
+                return None;
+            }
+            seen_offsets.insert(start);
+            Some(EntityMention {
+                text: m.as_str().trim().to_string(),
+                kind: EntityKind::FilingNumber,
                 offset: start,
             })
         })
@@ -377,5 +460,145 @@ mod tests {
         let text = "Rep. Maria Garcia spoke at the event.";
         let entities = extract_entities(text);
         assert!(entities.people.iter().all(|e| e.kind == EntityKind::Person));
+    }
+
+    #[test]
+    fn test_extract_date_long_month_format() {
+        let text = "The hearing is scheduled for January 15, 2024.";
+        let entities = extract_entities(text);
+        assert_eq!(entities.dates.len(), 1);
+        assert_eq!(entities.dates[0].text, "January 15, 2024");
+    }
+
+    #[test]
+    fn test_extract_date_short_month_with_period() {
+        let text = "The memo was dated Jan. 15, 2024.";
+        let entities = extract_entities(text);
+        assert_eq!(entities.dates.len(), 1);
+        assert_eq!(entities.dates[0].text, "Jan. 15, 2024");
+    }
+
+    #[test]
+    fn test_extract_date_slash_format() {
+        let text = "Submission date: 01/15/2024.";
+        let entities = extract_entities(text);
+        assert_eq!(entities.dates.len(), 1);
+        assert_eq!(entities.dates[0].text, "01/15/2024");
+    }
+
+    #[test]
+    fn test_extract_date_quarter_format() {
+        let text = "Spending increased in Q1 2024.";
+        let entities = extract_entities(text);
+        assert_eq!(entities.dates.len(), 1);
+        assert_eq!(entities.dates[0].text, "Q1 2024");
+    }
+
+    #[test]
+    fn test_extract_date_fy_format_no_space() {
+        let text = "The line item appears in FY2024 reporting.";
+        let entities = extract_entities(text);
+        assert_eq!(entities.dates.len(), 1);
+        assert_eq!(entities.dates[0].text, "FY2024");
+    }
+
+    #[test]
+    fn test_extract_date_fy_format_with_space() {
+        let text = "The line item appears in FY 2024 reporting.";
+        let entities = extract_entities(text);
+        assert_eq!(entities.dates.len(), 1);
+        assert_eq!(entities.dates[0].text, "FY 2024");
+    }
+
+    #[test]
+    fn test_extract_multiple_dates() {
+        let text = "Events occurred on Jan. 15, 2024 and 01/16/2024 in Q1 2024.";
+        let entities = extract_entities(text);
+        let dates: Vec<&str> = entities.dates.iter().map(|e| e.text.as_str()).collect();
+        assert!(dates.contains(&"Jan. 15, 2024"));
+        assert!(dates.contains(&"01/16/2024"));
+        assert!(dates.contains(&"Q1 2024"));
+        assert_eq!(entities.dates.len(), 3);
+    }
+
+    #[test]
+    fn test_extract_fec_filing_number() {
+        let text = "See filing FEC-2024-123 for details.";
+        let entities = extract_entities(text);
+        assert_eq!(entities.filing_numbers.len(), 1);
+        assert_eq!(entities.filing_numbers[0].text, "FEC-2024-123");
+    }
+
+    #[test]
+    fn test_extract_case_number_cv() {
+        let text = "The action was docketed as 24-cv-12345.";
+        let entities = extract_entities(text);
+        assert_eq!(entities.filing_numbers.len(), 1);
+        assert_eq!(entities.filing_numbers[0].text, "24-cv-12345");
+    }
+
+    #[test]
+    fn test_extract_case_number_cr() {
+        let text = "The criminal case is 22-cr-54321.";
+        let entities = extract_entities(text);
+        assert_eq!(entities.filing_numbers.len(), 1);
+        assert_eq!(entities.filing_numbers[0].text, "22-cr-54321");
+    }
+
+    #[test]
+    fn test_extract_congressional_bill_numbers() {
+        let text = "Related measures include H.R. 123, S. 456, H.Res. 12, and S.Res. 34.";
+        let entities = extract_entities(text);
+        let filings: Vec<&str> = entities
+            .filing_numbers
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect();
+        assert!(filings.contains(&"H.R. 123"));
+        assert!(filings.contains(&"S. 456"));
+        assert!(filings.contains(&"H.Res. 12"));
+        assert!(filings.contains(&"S.Res. 34"));
+        assert_eq!(entities.filing_numbers.len(), 4);
+    }
+
+    #[test]
+    fn test_extract_multiple_filing_number_types() {
+        let text = "References: FEC-2023-999, 23-cv-11111, and H.R. 789.";
+        let entities = extract_entities(text);
+        let filings: Vec<&str> = entities
+            .filing_numbers
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect();
+        assert!(filings.contains(&"FEC-2023-999"));
+        assert!(filings.contains(&"23-cv-11111"));
+        assert!(filings.contains(&"H.R. 789"));
+        assert_eq!(entities.filing_numbers.len(), 3);
+    }
+
+    #[test]
+    fn test_date_kind_is_correct() {
+        let text = "Deadline: January 15, 2024.";
+        let entities = extract_entities(text);
+        assert!(entities.dates.iter().all(|e| e.kind == EntityKind::Date));
+    }
+
+    #[test]
+    fn test_filing_number_kind_is_correct() {
+        let text = "Matter: 24-cr-12345.";
+        let entities = extract_entities(text);
+        assert!(
+            entities
+                .filing_numbers
+                .iter()
+                .all(|e| e.kind == EntityKind::FilingNumber)
+        );
+    }
+
+    #[test]
+    fn test_total_includes_dates_and_filing_numbers() {
+        let text = "On January 15, 2024, filing FEC-2024-123 reported $500 from Acme Corporation.";
+        let entities = extract_entities(text);
+        assert!(entities.total() >= 4);
     }
 }

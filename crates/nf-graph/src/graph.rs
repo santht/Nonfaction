@@ -346,6 +346,48 @@ impl NfGraph {
             .collect()
     }
 
+    /// Number of entities (nodes) in the graph.
+    pub fn entity_count(&self) -> usize {
+        self.graph.node_count()
+    }
+
+    /// Number of relationships (edges) in the graph.
+    pub fn relationship_count(&self) -> usize {
+        self.graph.edge_count()
+    }
+
+    /// Return each weakly-connected component as a `Vec<EntityId>`.
+    pub fn component_groups(&self) -> Vec<Vec<EntityId>> {
+        let mut visited: HashSet<NodeIndex> = HashSet::new();
+        let mut groups: Vec<Vec<EntityId>> = Vec::new();
+
+        for start in self.graph.node_indices() {
+            if visited.contains(&start) {
+                continue;
+            }
+            let mut queue: VecDeque<NodeIndex> = VecDeque::new();
+            queue.push_back(start);
+            visited.insert(start);
+            let mut members: Vec<EntityId> = Vec::new();
+
+            while let Some(node) = queue.pop_front() {
+                members.push(*self.graph.node_weight(node).unwrap());
+                for nb in self.graph.neighbors_directed(node, Direction::Outgoing) {
+                    if visited.insert(nb) {
+                        queue.push_back(nb);
+                    }
+                }
+                for nb in self.graph.neighbors_directed(node, Direction::Incoming) {
+                    if visited.insert(nb) {
+                        queue.push_back(nb);
+                    }
+                }
+            }
+            groups.push(members);
+        }
+        groups
+    }
+
     /// Access the underlying petgraph DiGraph.
     pub fn inner(&self) -> &DiGraph<EntityId, RelationshipType> {
         &self.graph
@@ -638,5 +680,109 @@ mod tests {
         let bc = g.betweenness_centrality();
         assert_eq!(bc.get(&a).copied().unwrap_or_default(), 0.0);
         assert_eq!(bc.get(&b).copied().unwrap_or_default(), 0.0);
+    }
+
+    #[test]
+    fn test_entity_count_empty() {
+        let g = NfGraph::new();
+        assert_eq!(g.entity_count(), 0);
+    }
+
+    #[test]
+    fn test_entity_count() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        g.add_node(a);
+        g.add_node(b);
+        g.add_node(c);
+        assert_eq!(g.entity_count(), 3);
+    }
+
+    #[test]
+    fn test_relationship_count_empty() {
+        let g = NfGraph::new();
+        assert_eq!(g.relationship_count(), 0);
+    }
+
+    #[test]
+    fn test_relationship_count() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(b, c, RelationshipType::Pardoned);
+        assert_eq!(g.relationship_count(), 2);
+        assert_eq!(g.entity_count(), 3);
+    }
+
+    #[test]
+    fn test_component_groups_empty_graph() {
+        let g = NfGraph::new();
+        assert!(g.component_groups().is_empty());
+    }
+
+    #[test]
+    fn test_component_groups_single_component() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(b, c, RelationshipType::Pardoned);
+
+        let groups = g.component_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 3);
+    }
+
+    #[test]
+    fn test_component_groups_two_components() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        let c = EntityId::new();
+        let d = EntityId::new();
+        g.add_edge(c, d, RelationshipType::Pardoned);
+
+        let groups = g.component_groups();
+        assert_eq!(groups.len(), 2);
+        let mut sizes: Vec<usize> = groups.iter().map(|g| g.len()).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![2, 2]);
+    }
+
+    #[test]
+    fn test_component_groups_isolated_nodes() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        g.add_node(a);
+        g.add_node(b);
+
+        let groups = g.component_groups();
+        assert_eq!(groups.len(), 2);
+        for group in &groups {
+            assert_eq!(group.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_component_groups_all_ids_present() {
+        let mut g = NfGraph::new();
+        let ids: Vec<EntityId> = (0..5).map(|_| EntityId::new()).collect();
+        g.add_edge(ids[0], ids[1], RelationshipType::DonatedTo);
+        g.add_node(ids[2]);
+        g.add_edge(ids[3], ids[4], RelationshipType::Pardoned);
+
+        let groups = g.component_groups();
+        let all: Vec<EntityId> = groups.into_iter().flatten().collect();
+        assert_eq!(all.len(), 5);
+        for id in &ids {
+            assert!(all.contains(id));
+        }
     }
 }

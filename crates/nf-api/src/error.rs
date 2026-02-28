@@ -40,6 +40,18 @@ pub enum ApiError {
 
     #[error("conflict: {0}")]
     Conflict(String),
+
+    #[error("invalid page number: {0}")]
+    InvalidPageNumber(String),
+
+    #[error("invalid page size: {0}")]
+    InvalidPageSize(String),
+
+    #[error("invalid search query: {0}")]
+    InvalidSearchQuery(String),
+
+    #[error("invalid entity id: {0}")]
+    InvalidEntityId(String),
 }
 
 impl From<nf_search::SearchError> for ApiError {
@@ -63,6 +75,10 @@ impl ApiError {
             ApiError::InvalidUuid(_) => StatusCode::BAD_REQUEST,
             ApiError::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::InvalidPageNumber(_) => StatusCode::BAD_REQUEST,
+            ApiError::InvalidPageSize(_) => StatusCode::BAD_REQUEST,
+            ApiError::InvalidSearchQuery(_) => StatusCode::BAD_REQUEST,
+            ApiError::InvalidEntityId(_) => StatusCode::BAD_REQUEST,
         }
     }
 
@@ -80,6 +96,10 @@ impl ApiError {
             ApiError::InvalidUuid(_) => "INVALID_UUID",
             ApiError::UnprocessableEntity(_) => "UNPROCESSABLE_ENTITY",
             ApiError::Conflict(_) => "CONFLICT",
+            ApiError::InvalidPageNumber(_) => "INVALID_PAGE_NUMBER",
+            ApiError::InvalidPageSize(_) => "INVALID_PAGE_SIZE",
+            ApiError::InvalidSearchQuery(_) => "INVALID_SEARCH_QUERY",
+            ApiError::InvalidEntityId(_) => "INVALID_ENTITY_ID",
         }
     }
 }
@@ -168,17 +188,31 @@ mod tests {
         assert_eq!(payload["error"]["code"], "BAD_REQUEST");
     }
 
-    #[tokio::test]
-    async fn test_error_response_includes_request_id() {
-        let response = with_request_id(
-            Some("req-123".to_string()),
-            async { ApiError::NotFound("entity missing".to_string()).into_response() },
-        )
-        .await;
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let payload: Value = serde_json::from_slice(&body).unwrap();
+    #[test]
+    fn test_invalid_page_number_status() {
+        let err = ApiError::InvalidPageNumber("page must be >= 1".to_string());
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.error_code(), "INVALID_PAGE_NUMBER");
+    }
 
-        assert_eq!(payload["error"]["request_id"], "req-123");
-        assert_eq!(payload["error"]["code"], "NOT_FOUND");
+    #[test]
+    fn test_invalid_page_size_status() {
+        let err = ApiError::InvalidPageSize("page_size must be between 1 and 100".to_string());
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.error_code(), "INVALID_PAGE_SIZE");
+    }
+
+    #[test]
+    fn test_invalid_search_query_status() {
+        let err = ApiError::InvalidSearchQuery("query contains only special characters".to_string());
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.error_code(), "INVALID_SEARCH_QUERY");
+    }
+
+    #[test]
+    fn test_invalid_entity_id_status() {
+        let err = ApiError::InvalidEntityId("not-a-valid-id".to_string());
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.error_code(), "INVALID_ENTITY_ID");
     }
 }

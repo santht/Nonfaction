@@ -23,6 +23,9 @@ pub enum StoreError {
     #[error("Integrity violation: {0}")]
     Integrity(String),
 
+    #[error("Archive integrity violation: {0}")]
+    IntegrityViolation(String),
+
     #[error("Archive error: {0}")]
     Archive(String),
 }

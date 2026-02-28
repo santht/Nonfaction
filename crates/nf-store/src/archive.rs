@@ -162,7 +162,69 @@ impl DocumentArchive {
         self.verify_node_recursive(root_hash)
     }
 
-    // ── Private helpers ──────────────────────────────────────────────────────
+    /// Walk every stored document file and verify its SHA-256 hash matches its
+    /// filename (the content address).
+    ///
+    /// Returns a `Vec` of `PathBuf`s for every file whose hash did not match.
+    /// An empty `Vec` means the archive is fully intact.
+    ///
+    /// The `merkle/` subdirectory is excluded; use [`Self::verify_dag`] for
+    /// Merkle-node integrity.
+    pub fn integrity_check(&self) -> Result<Vec<PathBuf>, StoreError> {
+        let mut mismatches = Vec::new();
+
+        // Walk the top-level two-character shard directories.
+        let top_entries = match fs::read_dir(&self.base_path) {
+            Ok(iter) => iter,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(mismatches),
+            Err(e) => return Err(StoreError::Io(e)),
+        };
+
+        for top_entry in top_entries {
+            let top_entry = top_entry?;
+            let top_name = top_entry.file_name();
+            let top_str = top_name.to_string_lossy();
+
+            // Skip the merkle/ directory.
+            if top_str == "merkle" {
+                continue;
+            }
+
+            // Each entry under base_path should be a 2-char hex shard dir.
+            if !top_entry.file_type()?.is_dir() {
+                continue;
+            }
+
+            // Walk the second-level shard directories.
+            for mid_entry in fs::read_dir(top_entry.path())? {
+                let mid_entry = mid_entry?;
+                if !mid_entry.file_type()?.is_dir() {
+                    continue;
+                }
+
+                // Walk the actual data files.
+                for file_entry in fs::read_dir(mid_entry.path())? {
+                    let file_entry = file_entry?;
+                    if !file_entry.file_type()?.is_file() {
+                        continue;
+                    }
+
+                    let file_path = file_entry.path();
+                    let file_name = file_entry.file_name();
+                    let expected_hash = file_name.to_string_lossy();
+
+                    let data = fs::read(&file_path)?;
+                    let actual_hash = sha256_hex(&data);
+
+                    if actual_hash != expected_hash.as_ref() {
+                        mismatches.push(file_path);
+                    }
+                }
+            }
+        }
+
+        Ok(mismatches)
+    }
 
     fn merkle_meta_path(&self, hash: &str) -> PathBuf {
         self.base_path
@@ -378,5 +440,83 @@ mod tests {
         fs::write(data_path, b"tampered-data").unwrap();
 
         assert!(!archive.verify_dag(&leaf.hash).unwrap());
+    }
+
+    // ── integrity_check tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_integrity_check_empty_archive_returns_no_mismatches() {
+        let (_dir, archive) = tmp_archive();
+        let mismatches = archive.integrity_check().unwrap();
+        assert!(mismatches.is_empty());
+    }
+
+    #[test]
+    fn test_integrity_check_valid_files_returns_no_mismatches() {
+        let (_dir, archive) = tmp_archive();
+        archive.store(b"file one").unwrap();
+        archive.store(b"file two").unwrap();
+        archive.store(b"file three").unwrap();
+        let mismatches = archive.integrity_check().unwrap();
+        assert!(mismatches.is_empty());
+    }
+
+    #[test]
+    fn test_integrity_check_detects_single_tampered_file() {
+        let (_dir, archive) = tmp_archive();
+        let hash = archive.store(b"genuine content").unwrap();
+        let path = sharded_path(&archive.base_path, &hash);
+        fs::write(&path, b"corrupted content").unwrap();
+        let mismatches = archive.integrity_check().unwrap();
+        assert_eq!(mismatches.len(), 1);
+        assert_eq!(mismatches[0], path);
+    }
+
+    #[test]
+    fn test_integrity_check_detects_multiple_tampered_files() {
+        let (_dir, archive) = tmp_archive();
+        let h1 = archive.store(b"alpha").unwrap();
+        let h2 = archive.store(b"beta").unwrap();
+        archive.store(b"gamma").unwrap(); // not tampered
+        let p1 = sharded_path(&archive.base_path, &h1);
+        let p2 = sharded_path(&archive.base_path, &h2);
+        fs::write(&p1, b"TAMPERED alpha").unwrap();
+        fs::write(&p2, b"TAMPERED beta").unwrap();
+        let mismatches = archive.integrity_check().unwrap();
+        assert_eq!(mismatches.len(), 2);
+        assert!(mismatches.contains(&p1));
+        assert!(mismatches.contains(&p2));
+    }
+
+    #[test]
+    fn test_integrity_check_ignores_merkle_directory() {
+        let (_dir, archive) = tmp_archive();
+        // Store a merkle node; it lives under base/merkle/...
+        let _node = archive.store_node(&[], Some(b"merkle-payload")).unwrap();
+        // The merkle sub-tree should be ignored by integrity_check.
+        let mismatches = archive.integrity_check().unwrap();
+        assert!(mismatches.is_empty());
+    }
+
+    #[test]
+    fn test_integrity_check_reports_paths_under_base() {
+        let (_dir, archive) = tmp_archive();
+        let hash = archive.store(b"path check content").unwrap();
+        let expected_path = sharded_path(&archive.base_path, &hash);
+        // Tamper it.
+        fs::write(&expected_path, b"corrupted").unwrap();
+        let mismatches = archive.integrity_check().unwrap();
+        assert!(mismatches[0].starts_with(&archive.base_path));
+    }
+
+    // ── IntegrityViolation error variant test ────────────────────────────────
+
+    #[test]
+    fn test_integrity_violation_error_variant_formats_message() {
+        use crate::error::StoreError;
+        let err = StoreError::IntegrityViolation("hash mismatch on file X".to_string());
+        let msg = err.to_string();
+        assert!(msg.contains("hash mismatch on file X"));
+        assert!(msg.contains("Archive integrity violation"));
     }
 }

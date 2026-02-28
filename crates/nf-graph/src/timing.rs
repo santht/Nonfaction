@@ -6,6 +6,25 @@ use nf_core::source::{ContentHash, SourceChain, SourceRef, SourceType};
 use serde_json::{Value, json};
 use url::Url;
 
+/// Severity of a suspicious timing flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Severity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// A suspicious timing pattern detected for an entity.
+#[derive(Debug, Clone)]
+pub struct TimingFlag {
+    pub entity_id: EntityId,
+    pub description: String,
+    pub severity: Severity,
+    /// Number of days between the two events.
+    pub time_delta: i64,
+}
+
 /// The type of event recorded in the timing engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventType {
@@ -144,6 +163,66 @@ impl TimingEngine {
     /// All stored events.
     pub fn events(&self) -> &[TimingEvent] {
         &self.events
+    }
+
+    /// Scan all recorded events and return suspicious timing flags:
+    /// - `Donation → Vote` within 30 days → `High`
+    /// - `Indictment → Pardon` (any gap) → `Critical`
+    /// - `Lobbying → Vote` within 90 days → `Medium`
+    pub fn flag_suspicious_timing(&self) -> Vec<TimingFlag> {
+        let mut flags = Vec::new();
+        let n = self.events.len();
+
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let a = &self.events[i];
+                let b = &self.events[j];
+
+                if a.entity_id != b.entity_id {
+                    continue;
+                }
+
+                let (earlier, later) = if a.date <= b.date { (a, b) } else { (b, a) };
+                let days = (later.date - earlier.date).num_days();
+
+                let flag = match (&earlier.event_type, &later.event_type) {
+                    (EventType::Donation, EventType::Vote) if days < 30 => Some(TimingFlag {
+                        entity_id: a.entity_id,
+                        description: format!(
+                            "Donation followed by vote within {} days",
+                            days
+                        ),
+                        severity: Severity::High,
+                        time_delta: days,
+                    }),
+                    (EventType::Indictment, EventType::Pardon) => Some(TimingFlag {
+                        entity_id: a.entity_id,
+                        description: format!(
+                            "Indictment followed by pardon ({} days apart)",
+                            days
+                        ),
+                        severity: Severity::Critical,
+                        time_delta: days,
+                    }),
+                    (EventType::Lobbying, EventType::Vote) if days < 90 => Some(TimingFlag {
+                        entity_id: a.entity_id,
+                        description: format!(
+                            "Lobbying followed by vote within {} days",
+                            days
+                        ),
+                        severity: Severity::Medium,
+                        time_delta: days,
+                    }),
+                    _ => None,
+                };
+
+                if let Some(f) = flag {
+                    flags.push(f);
+                }
+            }
+        }
+
+        flags
     }
 
     /// Export timing correlations into a stable JSON envelope.
@@ -768,6 +847,125 @@ mod tests {
         let engine = TimingEngine::new();
         let exported = engine.export_correlations_json(&[]);
         assert!(exported["correlations"].as_array().unwrap().is_empty());
+    }
+
+    // ── flag_suspicious_timing tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_flag_suspicious_timing_empty_engine() {
+        let engine = TimingEngine::new();
+        assert!(engine.flag_suspicious_timing().is_empty());
+    }
+
+    #[test]
+    fn test_flag_donation_to_vote_within_30_days_high_severity() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        engine.new_event(entity, EventType::Donation, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        engine.new_event(entity, EventType::Vote, NaiveDate::from_ymd_opt(2024, 1, 20).unwrap()); // 19 days
+
+        let flags = engine.flag_suspicious_timing();
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].severity, Severity::High);
+        assert_eq!(flags[0].time_delta, 19);
+        assert_eq!(flags[0].entity_id, entity);
+    }
+
+    #[test]
+    fn test_flag_donation_to_vote_exactly_30_days_not_flagged() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        engine.new_event(entity, EventType::Donation, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        engine.new_event(entity, EventType::Vote, NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()); // 30 days
+
+        let flags = engine.flag_suspicious_timing();
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn test_flag_indictment_to_pardon_always_critical() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        engine.new_event(entity, EventType::Indictment, NaiveDate::from_ymd_opt(2020, 1, 1).unwrap());
+        engine.new_event(entity, EventType::Pardon, NaiveDate::from_ymd_opt(2025, 12, 31).unwrap());
+
+        let flags = engine.flag_suspicious_timing();
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].severity, Severity::Critical);
+        assert_eq!(flags[0].entity_id, entity);
+    }
+
+    #[test]
+    fn test_flag_indictment_to_pardon_same_day_critical() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        let date = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
+        engine.new_event(entity, EventType::Indictment, date);
+        engine.new_event(entity, EventType::Pardon, date);
+
+        let flags = engine.flag_suspicious_timing();
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].severity, Severity::Critical);
+        assert_eq!(flags[0].time_delta, 0);
+    }
+
+    #[test]
+    fn test_flag_lobbying_to_vote_within_90_days_medium() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        engine.new_event(entity, EventType::Lobbying, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        engine.new_event(entity, EventType::Vote, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()); // 60 days
+
+        let flags = engine.flag_suspicious_timing();
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].severity, Severity::Medium);
+        assert_eq!(flags[0].time_delta, 60);
+    }
+
+    #[test]
+    fn test_flag_lobbying_to_vote_exactly_90_days_not_flagged() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        engine.new_event(entity, EventType::Lobbying, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        engine.new_event(entity, EventType::Vote, NaiveDate::from_ymd_opt(2024, 3, 31).unwrap()); // 90 days
+
+        let flags = engine.flag_suspicious_timing();
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn test_flag_different_entities_not_cross_flagged() {
+        let mut engine = TimingEngine::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        engine.new_event(a, EventType::Donation, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        engine.new_event(b, EventType::Vote, NaiveDate::from_ymd_opt(2024, 1, 10).unwrap());
+
+        let flags = engine.flag_suspicious_timing();
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn test_flag_untracked_pair_not_flagged() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        engine.new_event(entity, EventType::Donation, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        engine.new_event(entity, EventType::Donation, NaiveDate::from_ymd_opt(2024, 1, 5).unwrap());
+
+        let flags = engine.flag_suspicious_timing();
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn test_flag_description_contains_days() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        engine.new_event(entity, EventType::Donation, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        engine.new_event(entity, EventType::Vote, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()); // 14 days
+
+        let flags = engine.flag_suspicious_timing();
+        assert!(!flags.is_empty());
+        assert!(flags[0].description.contains("14"));
     }
 
     #[test]
