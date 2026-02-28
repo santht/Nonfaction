@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use tantivy::{
-    directory::MmapDirectory,
-    schema::{DateOptions, DateTimePrecision, Field, Schema, SchemaBuilder, STORED, STRING, TEXT},
     Index,
+    directory::MmapDirectory,
+    schema::{DateOptions, DateTimePrecision, Field, STORED, STRING, Schema, SchemaBuilder, TEXT},
 };
 
 use crate::error::SearchError;
@@ -49,7 +49,16 @@ impl NfSchema {
 
         let schema = builder.build();
 
-        Self { schema, entity_id, entity_type, name, content, tags, date, source_urls }
+        Self {
+            schema,
+            entity_id,
+            entity_type,
+            name,
+            content,
+            tags,
+            date,
+            source_urls,
+        }
     }
 }
 
@@ -70,8 +79,8 @@ pub fn open_or_create_index(
         IndexDirectory::Ram => Index::create_in_ram(nf_schema.schema.clone()),
         IndexDirectory::Mmap(path) => {
             std::fs::create_dir_all(&path)?;
-            let mmap_dir = MmapDirectory::open(&path)
-                .map_err(|e| SearchError::Directory(e.to_string()))?;
+            let mmap_dir =
+                MmapDirectory::open(&path).map_err(|e| SearchError::Directory(e.to_string()))?;
             Index::open_or_create(mmap_dir, nf_schema.schema.clone())?
         }
     };

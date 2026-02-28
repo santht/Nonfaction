@@ -1,0 +1,21 @@
+# Nonfaction configuration
+# Copy to nonfaction.toml and adjust values.
+# Environment variables (NF_ prefix) override these values.
+
+# PostgreSQL connection string
+database_url = "postgres://nonfaction:nonfaction@localhost:5432/nonfaction"
+
+# HTTP server bind address
+bind_addr = "0.0.0.0:3001"
+
+# Tantivy search index directory (use "ram" for ephemeral dev index)
+tantivy_dir = "./data/tantivy"
+
+# Content-addressable document archive directory
+archive_dir = "./data/archive"
+
+# Log level (trace, debug, info, warn, error)
+log_level = "info"
+
+# Maximum PostgreSQL connection pool size
+max_connections = 20

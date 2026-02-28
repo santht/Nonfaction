@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use nf_core::entities::EntityId;
 use nf_core::relationships::RelationshipType;
+use petgraph::Direction;
 use petgraph::algo::connected_components;
 use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::Direction;
 
 /// Directed graph over EntityIds with typed RelationshipType edges.
 pub struct NfGraph {
@@ -117,6 +117,103 @@ impl NfGraph {
         let out = self.graph.edges_directed(idx, Direction::Outgoing).count();
         let in_ = self.graph.edges_directed(idx, Direction::Incoming).count();
         (out + in_) as f64 / (n - 1) as f64
+    }
+
+    /// Degree centrality for every node in the graph.
+    pub fn degree_centrality_all(&self) -> HashMap<EntityId, f64> {
+        self.node_map
+            .keys()
+            .copied()
+            .map(|id| (id, self.degree_centrality(id)))
+            .collect()
+    }
+
+    /// Betweenness centrality over directed shortest paths (Brandes algorithm).
+    ///
+    /// Returned scores are normalized to `[0, 1]` by dividing by
+    /// `(N - 1) * (N - 2)` for `N >= 3`.
+    pub fn betweenness_centrality(&self) -> HashMap<EntityId, f64> {
+        let n = self.graph.node_count();
+        let mut cb: HashMap<NodeIndex, f64> =
+            self.graph.node_indices().map(|idx| (idx, 0.0)).collect();
+
+        if n < 3 {
+            return self
+                .graph
+                .node_indices()
+                .map(|idx| (*self.graph.node_weight(idx).unwrap(), 0.0))
+                .collect();
+        }
+
+        for source in self.graph.node_indices() {
+            let mut stack: Vec<NodeIndex> = Vec::new();
+            let mut predecessors: HashMap<NodeIndex, Vec<NodeIndex>> = self
+                .graph
+                .node_indices()
+                .map(|idx| (idx, Vec::new()))
+                .collect();
+            let mut sigma: HashMap<NodeIndex, f64> =
+                self.graph.node_indices().map(|idx| (idx, 0.0)).collect();
+            let mut distance: HashMap<NodeIndex, i64> =
+                self.graph.node_indices().map(|idx| (idx, -1)).collect();
+
+            sigma.insert(source, 1.0);
+            distance.insert(source, 0);
+
+            let mut queue: VecDeque<NodeIndex> = VecDeque::new();
+            queue.push_back(source);
+
+            while let Some(v) = queue.pop_front() {
+                stack.push(v);
+                let v_dist = *distance.get(&v).unwrap();
+
+                for w in self.graph.neighbors(v) {
+                    if *distance.get(&w).unwrap() < 0 {
+                        queue.push_back(w);
+                        distance.insert(w, v_dist + 1);
+                    }
+                    if *distance.get(&w).unwrap() == v_dist + 1 {
+                        let sigma_w = sigma.get(&w).copied().unwrap_or(0.0);
+                        let sigma_v = sigma.get(&v).copied().unwrap_or(0.0);
+                        sigma.insert(w, sigma_w + sigma_v);
+                        predecessors.get_mut(&w).unwrap().push(v);
+                    }
+                }
+            }
+
+            let mut dependency: HashMap<NodeIndex, f64> =
+                self.graph.node_indices().map(|idx| (idx, 0.0)).collect();
+
+            while let Some(w) = stack.pop() {
+                let sigma_w = sigma.get(&w).copied().unwrap_or(0.0);
+                if sigma_w == 0.0 {
+                    continue;
+                }
+
+                for v in predecessors.get(&w).unwrap() {
+                    let sigma_v = sigma.get(v).copied().unwrap_or(0.0);
+                    let delta_w = dependency.get(&w).copied().unwrap_or(0.0);
+                    let contribution = (sigma_v / sigma_w) * (1.0 + delta_w);
+                    let delta_v = dependency.get(v).copied().unwrap_or(0.0);
+                    dependency.insert(*v, delta_v + contribution);
+                }
+
+                if w != source {
+                    let score = cb.get(&w).copied().unwrap_or(0.0);
+                    cb.insert(w, score + dependency.get(&w).copied().unwrap_or(0.0));
+                }
+            }
+        }
+
+        let norm = ((n - 1) * (n - 2)) as f64;
+        self.graph
+            .node_indices()
+            .map(|idx| {
+                let id = *self.graph.node_weight(idx).unwrap();
+                let normalized = cb.get(&idx).copied().unwrap_or(0.0) / norm;
+                (id, normalized)
+            })
+            .collect()
     }
 
     /// Access the underlying petgraph DiGraph.
@@ -282,5 +379,48 @@ mod tests {
         let a = EntityId::new();
         g.add_node(a);
         assert_eq!(g.degree_centrality(a), 0.0);
+    }
+
+    #[test]
+    fn test_degree_centrality_all() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(a, c, RelationshipType::DonatedTo);
+
+        let scores = g.degree_centrality_all();
+        assert_eq!(scores.len(), 3);
+        assert!((scores.get(&a).copied().unwrap_or_default() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_betweenness_centrality_chain() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(b, c, RelationshipType::DonatedTo);
+
+        let bc = g.betweenness_centrality();
+        assert_eq!(bc.len(), 3);
+        assert!(bc.get(&b).copied().unwrap_or_default() > 0.0);
+        assert_eq!(bc.get(&a).copied().unwrap_or_default(), 0.0);
+        assert_eq!(bc.get(&c).copied().unwrap_or_default(), 0.0);
+    }
+
+    #[test]
+    fn test_betweenness_centrality_disconnected() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        g.add_node(a);
+        g.add_node(b);
+
+        let bc = g.betweenness_centrality();
+        assert_eq!(bc.get(&a).copied().unwrap_or_default(), 0.0);
+        assert_eq!(bc.get(&b).copied().unwrap_or_default(), 0.0);
     }
 }

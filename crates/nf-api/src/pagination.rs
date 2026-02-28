@@ -40,16 +40,22 @@ pub struct PaginatedResponse<T: Serialize> {
     pub page: u32,
     pub per_page: u32,
     pub total_in_page: usize,
+    pub total_count: i64,
+    pub total_pages: u32,
 }
 
 impl<T: Serialize> PaginatedResponse<T> {
     pub fn from_page(page: Page<T>, pagination: Pagination) -> Self {
         let total_in_page = page.items.len();
+        let total_count = page.total_count;
+        let total_pages = page.total_pages();
         Self {
             items: page.items,
             page: pagination.page,
             per_page: pagination.per_page(),
             total_in_page,
+            total_count,
+            total_pages,
         }
     }
 }
@@ -90,7 +96,7 @@ mod tests {
 
     #[test]
     fn test_paginated_response_from_page() {
-        let page: Page<i32> = Page::new(vec![1, 2, 3], 0, 20);
+        let page: Page<i32> = Page::with_total(vec![1, 2, 3], 0, 20, 50);
         let pagination = Pagination {
             page: 1,
             per_page: 20,
@@ -99,5 +105,7 @@ mod tests {
         assert_eq!(response.items.len(), 3);
         assert_eq!(response.total_in_page, 3);
         assert_eq!(response.page, 1);
+        assert_eq!(response.total_count, 50);
+        assert_eq!(response.total_pages, 3);
     }
 }

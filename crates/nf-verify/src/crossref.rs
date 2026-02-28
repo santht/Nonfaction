@@ -30,10 +30,7 @@ pub struct CrossRefResult {
 }
 
 /// Cross-reference a person by name against the OpenSanctions API.
-pub async fn crossref_person(
-    client: &reqwest::Client,
-    name: &str,
-) -> VerifyResult<CrossRefResult> {
+pub async fn crossref_person(client: &reqwest::Client, name: &str) -> VerifyResult<CrossRefResult> {
     crossref_person_with_base(client, name, OPENSANCTIONS_BASE).await
 }
 

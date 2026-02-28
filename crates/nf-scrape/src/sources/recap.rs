@@ -17,7 +17,7 @@ use nf_core::{
 };
 
 use crate::config::RecapConfig;
-use crate::framework::{ScrapeError, ScrapeResult, ScrapeSource, ScraperRuntime};
+use crate::framework::{ScrapeError, ScrapeResult, ScrapeSource, Scraper, ScraperRuntime};
 
 // ── API response shapes ───────────────────────────────────────────────────────
 
@@ -82,8 +82,19 @@ fn infer_case_type(nature_of_suit: Option<&str>, court: Option<&str>) -> CaseTyp
     // District courts use cacd, cand, caed, casd — these are NOT appellate.
     let is_circuit = matches!(
         court_str.as_str(),
-        "ca1" | "ca2" | "ca3" | "ca4" | "ca5" | "ca6" | "ca7" | "ca8" | "ca9"
-            | "ca10" | "ca11" | "cadc" | "cafc"
+        "ca1"
+            | "ca2"
+            | "ca3"
+            | "ca4"
+            | "ca5"
+            | "ca6"
+            | "ca7"
+            | "ca8"
+            | "ca9"
+            | "ca10"
+            | "ca11"
+            | "cadc"
+            | "cafc"
     );
     if is_circuit {
         return CaseType::Appellate;
@@ -119,34 +130,9 @@ impl RecapScraper {
         }
     }
 
-    /// Fetch JSON from CourtListener, applying auth if configured.
-    async fn fetch_cl_json(
-        &self,
-        url: &Url,
-        runtime: &ScraperRuntime,
-    ) -> ScrapeResult<Option<serde_json::Value>> {
-        let url_str = url.to_string();
-
-        if !runtime.mark_seen(&url_str).await {
-            return Ok(None);
-        }
-
-        runtime.wait_for_token().await;
-
-        let mut builder = runtime.client.get(url.clone());
-        builder = self.apply_auth(builder);
-
-        let resp = builder.send().await.map_err(ScrapeError::Http)?;
-        let json = resp.json::<serde_json::Value>().await.map_err(ScrapeError::Http)?;
-        Ok(Some(json))
-    }
-
     // ── Dockets ───────────────────────────────────────────────────────────────
 
-    pub async fn scrape_dockets(
-        &self,
-        runtime: &ScraperRuntime,
-    ) -> ScrapeResult<Vec<Entity>> {
+    pub async fn scrape_dockets(&self, runtime: &ScraperRuntime) -> ScrapeResult<Vec<Entity>> {
         let mut entities = Vec::new();
         let mut page = 1u32;
 
@@ -166,7 +152,7 @@ impl RecapScraper {
             )
             .map_err(ScrapeError::UrlParse)?;
 
-            let Some(json) = self.fetch_cl_json(&url, runtime).await? else {
+            let Some(json) = self.fetch_json(runtime, &url).await? else {
                 break;
             };
 
@@ -238,10 +224,7 @@ impl RecapScraper {
 
     // ── Opinions ──────────────────────────────────────────────────────────────
 
-    pub async fn scrape_opinions(
-        &self,
-        runtime: &ScraperRuntime,
-    ) -> ScrapeResult<Vec<Entity>> {
+    pub async fn scrape_opinions(&self, runtime: &ScraperRuntime) -> ScrapeResult<Vec<Entity>> {
         let mut entities = Vec::new();
         let mut page = 1u32;
 
@@ -261,7 +244,7 @@ impl RecapScraper {
             )
             .map_err(ScrapeError::UrlParse)?;
 
-            let Some(json) = self.fetch_cl_json(&url, runtime).await? else {
+            let Some(json) = self.fetch_json(runtime, &url).await? else {
                 break;
             };
 
@@ -293,9 +276,7 @@ impl RecapScraper {
                 let opinion_source_url = opinion
                     .absolute_url
                     .as_ref()
-                    .and_then(|rel| {
-                        Url::parse(&format!("https://www.courtlistener.com{rel}")).ok()
-                    })
+                    .and_then(|rel| Url::parse(&format!("https://www.courtlistener.com{rel}")).ok())
                     .unwrap_or_else(|| url.clone());
 
                 let opinion_source_ref = SourceRef::new(
@@ -344,9 +325,23 @@ impl RecapScraper {
     }
 }
 
-impl ScrapeSource for RecapScraper {
+impl Scraper for RecapScraper {
     fn source_id(&self) -> &str {
         "recap"
+    }
+
+    fn source_config(&self) -> &crate::config::SourceConfig {
+        &self.config.source
+    }
+
+    fn prepare_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        self.apply_auth(request)
+    }
+}
+
+impl ScrapeSource for RecapScraper {
+    fn source_id(&self) -> &str {
+        <Self as Scraper>::source_id(self)
     }
 
     fn scrape_all<'a>(
@@ -368,7 +363,7 @@ impl ScrapeSource for RecapScraper {
 mod tests {
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_config(base_url: String) -> RecapConfig {
@@ -431,7 +426,10 @@ mod tests {
 
         if let Entity::CourtCase(cc) = &entities[0] {
             assert_eq!(cc.case_id, "1001");
-            assert_eq!(cc.filing_date, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
+            assert_eq!(
+                cc.filing_date,
+                Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap())
+            );
             assert!(cc.disposition_date.is_none());
         }
 
@@ -473,7 +471,10 @@ mod tests {
         if let Entity::CourtCase(cc) = &entities[0] {
             assert_eq!(cc.case_id, "opinion-5001");
             assert_eq!(cc.case_type, CaseType::SupremeCourt);
-            assert_eq!(cc.filing_date, Some(NaiveDate::from_ymd_opt(2024, 3, 20).unwrap()));
+            assert_eq!(
+                cc.filing_date,
+                Some(NaiveDate::from_ymd_opt(2024, 3, 20).unwrap())
+            );
             // Source URL should be the opinion's canonical URL, not the list endpoint.
             let src_url = cc.meta.sources.primary.source_url.to_string();
             assert!(
@@ -507,10 +508,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_court_type_inference() {
-        assert_eq!(infer_case_type(None, Some("scotus")), CaseType::SupremeCourt);
+        assert_eq!(
+            infer_case_type(None, Some("scotus")),
+            CaseType::SupremeCourt
+        );
         assert_eq!(infer_case_type(None, Some("ca9")), CaseType::Appellate);
-        assert_eq!(infer_case_type(None, Some("bankr-dcd")), CaseType::Bankruptcy);
-        assert_eq!(infer_case_type(Some("Criminal"), Some("dcd")), CaseType::Criminal);
+        assert_eq!(
+            infer_case_type(None, Some("bankr-dcd")),
+            CaseType::Bankruptcy
+        );
+        assert_eq!(
+            infer_case_type(Some("Criminal"), Some("dcd")),
+            CaseType::Criminal
+        );
         assert_eq!(infer_case_type(None, Some("dcd")), CaseType::Civil);
     }
 
@@ -538,5 +548,29 @@ mod tests {
         let result = scraper.scrape_all(&runtime).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_auth_token_is_applied() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/dockets/"))
+            .and(header("authorization", "Bearer recap-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "count": 0,
+                "next": null,
+                "results": []
+            })))
+            .mount(&server)
+            .await;
+
+        let mut cfg = make_config(server.uri());
+        cfg.api_token = Some("recap-token".to_string());
+
+        let scraper = RecapScraper::new(cfg);
+        let runtime = ScraperRuntime::new_unlimited();
+        let entities = scraper.scrape_dockets(&runtime).await.unwrap();
+        assert!(entities.is_empty());
     }
 }

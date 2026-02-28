@@ -1,5 +1,5 @@
-use crate::error::StoreError;
 use crate::db::DbPool;
+use crate::error::StoreError;
 
 /// Run all embedded SQL migrations against the given pool.
 ///
@@ -19,7 +19,9 @@ mod tests {
             return;
         };
         let pool = crate::db::connect(&url).await.expect("connect");
-        run(&pool).await.expect("migrations should run without error");
+        run(&pool)
+            .await
+            .expect("migrations should run without error");
         pool.close().await;
     }
 }

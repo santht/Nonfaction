@@ -2,9 +2,9 @@ use std::ops::Bound;
 
 use chrono::{NaiveDate, TimeZone, Utc};
 use tantivy::{
+    DateTime as TantivyDateTime, Index, Term,
     query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery},
     schema::IndexRecordOption,
-    DateTime as TantivyDateTime, Index, Term,
 };
 
 use crate::{error::SearchError, index::NfSchema};
@@ -31,7 +31,11 @@ pub struct QueryBuilder<'a> {
 
 impl<'a> QueryBuilder<'a> {
     pub fn new(schema: &'a NfSchema, index: &'a Index) -> Self {
-        Self { schema, index, clauses: Vec::new() }
+        Self {
+            schema,
+            index,
+            clauses: Vec::new(),
+        }
     }
 
     /// Full-text search across the `name`, `content`, and `tags` fields.
@@ -47,8 +51,7 @@ impl<'a> QueryBuilder<'a> {
 
     /// Restrict search to the `name` field only.
     pub fn with_name(mut self, name: &str) -> Result<Self, SearchError> {
-        let parser =
-            QueryParser::for_index(self.index, vec![self.schema.name]);
+        let parser = QueryParser::for_index(self.index, vec![self.schema.name]);
         let q = parser.parse_query(name)?;
         self.clauses.push((Occur::Must, q));
         Ok(self)
@@ -86,7 +89,11 @@ impl<'a> QueryBuilder<'a> {
             .map(Bound::Included)
             .unwrap_or(Bound::Unbounded);
 
-        let field_name = self.index.schema().get_field_name(self.schema.date).to_owned();
+        let field_name = self
+            .index
+            .schema()
+            .get_field_name(self.schema.date)
+            .to_owned();
         let q = Box::new(RangeQuery::new_date_bounds(field_name, lower, upper));
         self.clauses.push((Occur::Must, q));
         self
@@ -94,8 +101,7 @@ impl<'a> QueryBuilder<'a> {
 
     /// Restrict results to entities that have the given tag indexed.
     pub fn with_tag(mut self, tag: &str) -> Result<Self, SearchError> {
-        let parser =
-            QueryParser::for_index(self.index, vec![self.schema.tags]);
+        let parser = QueryParser::for_index(self.index, vec![self.schema.tags]);
         let q = parser.parse_query(tag)?;
         self.clauses.push((Occur::Must, q));
         Ok(self)

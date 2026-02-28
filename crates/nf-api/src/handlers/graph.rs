@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Path, Query, State},
     Json,
+    extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -290,8 +290,7 @@ pub async fn get_correlations(
     for entity in correlations_page.items {
         if let Entity::TimingCorrelation(ref tc) = entity {
             // Check if the official is involved (event_a or event_b points to them).
-            let involves_official =
-                tc.event_a.0 == official_id || tc.event_b.0 == official_id;
+            let involves_official = tc.event_a.0 == official_id || tc.event_b.0 == official_id;
 
             if involves_official {
                 total += 1;
@@ -321,7 +320,10 @@ fn entity_label(entity: &Entity) -> String {
         Entity::Pardon(p) => format!("Pardon: {}", p.offense),
         Entity::FlightLogEntry(f) => format!("Flight {}", f.aircraft_tail_number),
         Entity::TimingCorrelation(t) => {
-            format!("{}→{} ({} days)", t.event_a_description, t.event_b_description, t.days_between)
+            format!(
+                "{}→{} ({} days)",
+                t.event_a_description, t.event_b_description, t.days_between
+            )
         }
         Entity::ConductComparison(c) => c.official_action.clone(),
         Entity::PublicStatement(s) => s.content_summary.clone(),
@@ -391,7 +393,10 @@ mod tests {
 
     #[test]
     fn test_cyto_edge_label_from_rel() {
-        use nf_core::{entities::EntityId, relationships::{Relationship, RelationshipType}};
+        use nf_core::{
+            entities::EntityId,
+            relationships::{Relationship, RelationshipType},
+        };
         let rel = Relationship::new(
             EntityId::new(),
             EntityId::new(),

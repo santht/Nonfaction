@@ -3,4 +3,6 @@ target/
 *.swp
 .DS_Store
 node_modules/
+nonfaction.toml
+data/
 

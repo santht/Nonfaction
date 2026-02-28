@@ -3,15 +3,22 @@ name = "nf-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Admin CLI — import, diagnostics, scraper management, data export"
+description = "Admin CLI — server, import, diagnostics, scraper management, data export"
+
+[[bin]]
+name = "nonfaction"
+path = "src/main.rs"
 
 [dependencies]
 nf-core = { path = "../nf-core" }
 nf-store = { path = "../nf-store" }
+nf-api = { path = "../nf-api" }
 nf-scrape = { path = "../nf-scrape" }
 nf-search = { path = "../nf-search" }
 nf-graph = { path = "../nf-graph" }
 nf-ingest = { path = "../nf-ingest" }
+nf-crowd = { path = "../nf-crowd" }
+nf-verify = { path = "../nf-verify" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,6 +26,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 figment = { workspace = true }
 thiserror = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = { workspace = true }
+tantivy = { workspace = true }
+sqlx = { workspace = true }
+axum = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }

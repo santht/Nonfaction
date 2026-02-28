@@ -6,8 +6,8 @@
 //! - GET /v1/schedules/schedule_a/ → Payment entities (contributions)
 //! - GET /v1/schedules/schedule_b/ → Payment entities (disbursements)
 
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 
 use chrono::NaiveDate;
 use serde::Deserialize;
@@ -15,12 +15,12 @@ use tracing::{debug, warn};
 use url::Url;
 
 use nf_core::{
-    ContentHash, Entity, EntityMeta, Organization, OrganizationType, Party, Payment,
-    PaymentType, Person, SourceChain, SourceRef, SourceType,
+    ContentHash, Entity, EntityMeta, Organization, OrganizationType, Party, Payment, PaymentType,
+    Person, SourceChain, SourceRef, SourceType,
 };
 
 use crate::config::FecConfig;
-use crate::framework::{ScrapeError, ScrapeResult, ScrapeSource, ScraperRuntime};
+use crate::framework::{ScrapeError, ScrapeResult, ScrapeSource, Scraper, ScraperRuntime};
 
 // ── API response shapes ───────────────────────────────────────────────────────
 
@@ -123,7 +123,8 @@ fn org_type_from_committee_type(ct: Option<&str>) -> OrganizationType {
 }
 
 fn filing_id_from_value(v: Option<&serde_json::Value>) -> Option<String> {
-    v?.as_i64().map(|n| n.to_string())
+    v?.as_i64()
+        .map(|n| n.to_string())
         .or_else(|| v?.as_str().map(|s| s.to_string()))
 }
 
@@ -148,10 +149,7 @@ impl FecScraper {
 
     // ── Candidates ────────────────────────────────────────────────────────────
 
-    pub async fn scrape_candidates(
-        &self,
-        runtime: &ScraperRuntime,
-    ) -> ScrapeResult<Vec<Entity>> {
+    pub async fn scrape_candidates(&self, runtime: &ScraperRuntime) -> ScrapeResult<Vec<Entity>> {
         let mut entities = Vec::new();
         let mut page = 1u32;
 
@@ -171,15 +169,15 @@ impl FecScraper {
             )
             .map_err(ScrapeError::UrlParse)?;
 
-            let Some(json) = runtime.fetch_json(&url).await? else {
+            let Some(json) = self.fetch_json(runtime, &url).await? else {
                 break;
             };
 
             let raw = serde_json::to_vec(&json).unwrap_or_default();
             let source_ref = fec_source_ref(&url, &raw);
 
-            let page_data: FecPage<FecCandidate> = serde_json::from_value(json)
-                .map_err(ScrapeError::Json)?;
+            let page_data: FecPage<FecCandidate> =
+                serde_json::from_value(json).map_err(ScrapeError::Json)?;
 
             if page_data.results.is_empty() {
                 break;
@@ -199,15 +197,10 @@ impl FecScraper {
                             "candidate_id={}",
                             candidate.candidate_id.as_deref().unwrap_or("unknown")
                         ))
-                        .with_filing_id(
-                            candidate.candidate_id.clone().unwrap_or_default(),
-                        ),
+                        .with_filing_id(candidate.candidate_id.clone().unwrap_or_default()),
                 );
 
-                let mut person = Person::new(
-                    candidate.name.as_deref().unwrap_or("Unknown"),
-                    chain,
-                );
+                let mut person = Person::new(candidate.name.as_deref().unwrap_or("Unknown"), chain);
                 person.party_affiliation = parse_party(candidate.party.as_deref());
                 person.current_role = candidate.office.clone();
                 person.status = nf_core::PersonStatus::Candidate;
@@ -233,10 +226,7 @@ impl FecScraper {
 
     // ── Committees ────────────────────────────────────────────────────────────
 
-    pub async fn scrape_committees(
-        &self,
-        runtime: &ScraperRuntime,
-    ) -> ScrapeResult<Vec<Entity>> {
+    pub async fn scrape_committees(&self, runtime: &ScraperRuntime) -> ScrapeResult<Vec<Entity>> {
         let mut entities = Vec::new();
         let mut page = 1u32;
 
@@ -256,15 +246,15 @@ impl FecScraper {
             )
             .map_err(ScrapeError::UrlParse)?;
 
-            let Some(json) = runtime.fetch_json(&url).await? else {
+            let Some(json) = self.fetch_json(runtime, &url).await? else {
                 break;
             };
 
             let raw = serde_json::to_vec(&json).unwrap_or_default();
             let source_ref = fec_source_ref(&url, &raw);
 
-            let page_data: FecPage<FecCommittee> = serde_json::from_value(json)
-                .map_err(ScrapeError::Json)?;
+            let page_data: FecPage<FecCommittee> =
+                serde_json::from_value(json).map_err(ScrapeError::Json)?;
 
             if page_data.results.is_empty() {
                 break;
@@ -284,9 +274,7 @@ impl FecScraper {
                             "committee_id={}",
                             committee.committee_id.as_deref().unwrap_or("unknown")
                         ))
-                        .with_filing_id(
-                            committee.committee_id.clone().unwrap_or_default(),
-                        ),
+                        .with_filing_id(committee.committee_id.clone().unwrap_or_default()),
                 );
 
                 let org_type =
@@ -312,10 +300,7 @@ impl FecScraper {
 
     // ── Schedule A (contributions / receipts) ─────────────────────────────────
 
-    pub async fn scrape_schedule_a(
-        &self,
-        runtime: &ScraperRuntime,
-    ) -> ScrapeResult<Vec<Entity>> {
+    pub async fn scrape_schedule_a(&self, runtime: &ScraperRuntime) -> ScrapeResult<Vec<Entity>> {
         let mut entities = Vec::new();
         let mut page = 1u32;
 
@@ -335,15 +320,15 @@ impl FecScraper {
             )
             .map_err(ScrapeError::UrlParse)?;
 
-            let Some(json) = runtime.fetch_json(&url).await? else {
+            let Some(json) = self.fetch_json(runtime, &url).await? else {
                 break;
             };
 
             let raw = serde_json::to_vec(&json).unwrap_or_default();
             let source_ref = fec_source_ref(&url, &raw);
 
-            let page_data: FecPage<FecScheduleA> = serde_json::from_value(json)
-                .map_err(ScrapeError::Json)?;
+            let page_data: FecPage<FecScheduleA> =
+                serde_json::from_value(json).map_err(ScrapeError::Json)?;
 
             if page_data.results.is_empty() {
                 break;
@@ -378,11 +363,13 @@ impl FecScraper {
                     amount,
                 );
 
-                let contributor_chain = SourceChain::new(
-                    source_ref.clone().with_reference_detail(detail.clone()),
-                );
+                let contributor_chain =
+                    SourceChain::new(source_ref.clone().with_reference_detail(detail.clone()));
                 let contributor = Person::new(
-                    record.contributor_name.as_deref().unwrap_or("Unknown Contributor"),
+                    record
+                        .contributor_name
+                        .as_deref()
+                        .unwrap_or("Unknown Contributor"),
                     contributor_chain,
                 );
                 let contributor_id = contributor.meta.id;
@@ -393,9 +380,8 @@ impl FecScraper {
                     .as_deref()
                     .unwrap_or("Unknown Committee")
                     .to_string();
-                let committee_chain = SourceChain::new(
-                    source_ref.clone().with_reference_detail(detail.clone()),
-                );
+                let committee_chain =
+                    SourceChain::new(source_ref.clone().with_reference_detail(detail.clone()));
                 let committee =
                     Organization::new(&committee_name, OrganizationType::Pac, committee_chain);
                 let committee_id = committee.meta.id;
@@ -432,10 +418,7 @@ impl FecScraper {
 
     // ── Schedule B (disbursements) ────────────────────────────────────────────
 
-    pub async fn scrape_schedule_b(
-        &self,
-        runtime: &ScraperRuntime,
-    ) -> ScrapeResult<Vec<Entity>> {
+    pub async fn scrape_schedule_b(&self, runtime: &ScraperRuntime) -> ScrapeResult<Vec<Entity>> {
         let mut entities = Vec::new();
         let mut page = 1u32;
 
@@ -455,15 +438,15 @@ impl FecScraper {
             )
             .map_err(ScrapeError::UrlParse)?;
 
-            let Some(json) = runtime.fetch_json(&url).await? else {
+            let Some(json) = self.fetch_json(runtime, &url).await? else {
                 break;
             };
 
             let raw = serde_json::to_vec(&json).unwrap_or_default();
             let source_ref = fec_source_ref(&url, &raw);
 
-            let page_data: FecPage<FecScheduleB> = serde_json::from_value(json)
-                .map_err(ScrapeError::Json)?;
+            let page_data: FecPage<FecScheduleB> =
+                serde_json::from_value(json).map_err(ScrapeError::Json)?;
 
             if page_data.results.is_empty() {
                 break;
@@ -506,7 +489,10 @@ impl FecScraper {
                 let recipient_chain =
                     SourceChain::new(source_ref.clone().with_reference_detail(detail.clone()));
                 let recipient = Organization::new(
-                    record.recipient_name.as_deref().unwrap_or("Unknown Recipient"),
+                    record
+                        .recipient_name
+                        .as_deref()
+                        .unwrap_or("Unknown Recipient"),
                     OrganizationType::Other,
                     recipient_chain,
                 );
@@ -543,9 +529,19 @@ impl FecScraper {
     }
 }
 
-impl ScrapeSource for FecScraper {
+impl Scraper for FecScraper {
     fn source_id(&self) -> &str {
         "fec"
+    }
+
+    fn source_config(&self) -> &crate::config::SourceConfig {
+        &self.config.source
+    }
+}
+
+impl ScrapeSource for FecScraper {
+    fn source_id(&self) -> &str {
+        <Self as Scraper>::source_id(self)
     }
 
     fn scrape_all<'a>(
@@ -710,7 +706,10 @@ mod tests {
         // One contribution → Person (donor) + Organization (committee) + Payment
         assert_eq!(entities.len(), 3);
 
-        let payment = entities.iter().find(|e| e.type_name() == "Payment").unwrap();
+        let payment = entities
+            .iter()
+            .find(|e| e.type_name() == "Payment")
+            .unwrap();
         assert!(payment.sources().source_count() >= 1);
         assert!(!payment.sources().primary.source_url.to_string().is_empty());
 
@@ -807,7 +806,10 @@ mod tests {
         let runtime = ScraperRuntime::new_unlimited();
 
         let entities = scraper.scrape_schedule_a(&runtime).await.unwrap();
-        assert!(entities.is_empty(), "records without dates should be skipped");
+        assert!(
+            entities.is_empty(),
+            "records without dates should be skipped"
+        );
     }
 
     #[tokio::test]
@@ -815,7 +817,12 @@ mod tests {
         let server = MockServer::start().await;
 
         // Register all four endpoints with empty results so scrape_all completes.
-        for path_str in ["/candidates/", "/committees/", "/schedules/schedule_a/", "/schedules/schedule_b/"] {
+        for path_str in [
+            "/candidates/",
+            "/committees/",
+            "/schedules/schedule_a/",
+            "/schedules/schedule_b/",
+        ] {
             Mock::given(method("GET"))
                 .and(path(path_str))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({

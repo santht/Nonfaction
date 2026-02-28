@@ -95,7 +95,7 @@ pub enum Party {
 pub enum Jurisdiction {
     Federal,
     State(String),
-    County(String, String), // (state, county)
+    County(String, String),    // (state, county)
     Municipal(String, String), // (state, city)
 }
 
@@ -120,11 +120,7 @@ pub struct Organization {
 }
 
 impl Organization {
-    pub fn new(
-        name: impl Into<String>,
-        org_type: OrganizationType,
-        sources: SourceChain,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, org_type: OrganizationType, sources: SourceChain) -> Self {
         Self {
             meta: EntityMeta::new(sources),
             name: name.into(),
@@ -546,8 +542,8 @@ mod tests {
             official: EntityId::new(),
             action_date: NaiveDate::from_ymd_opt(2024, 3, 5).unwrap(),
             action_source: "FEC + Roll Call".to_string(),
-            equivalent_private_conduct:
-                "Employee accepts payment, covers up employer misconduct".to_string(),
+            equivalent_private_conduct: "Employee accepts payment, covers up employer misconduct"
+                .to_string(),
             documented_consequence: "Termination + fraud charges".to_string(),
             consequence_source: "Case No. 2023-CV-12345".to_string(),
         };

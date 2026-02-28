@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use nf_core::entities::EntityId;
-use petgraph::graph::NodeIndex;
 use petgraph::Direction;
+use petgraph::graph::NodeIndex;
 
 use crate::graph::NfGraph;
 
@@ -68,6 +68,47 @@ pub fn label_propagation(nf_graph: &NfGraph) -> HashMap<u32, Vec<EntityId>> {
         let entity_id = *graph.node_weight(node).unwrap();
         let label = labels[node.index()];
         communities.entry(label).or_default().push(entity_id);
+    }
+
+    communities
+}
+
+/// Detect communities using weakly connected components.
+///
+/// Returns a map from component index to member EntityIds.
+pub fn connected_component_communities(nf_graph: &NfGraph) -> HashMap<usize, Vec<EntityId>> {
+    let graph = nf_graph.inner();
+    let mut visited: HashSet<NodeIndex> = HashSet::new();
+    let mut communities: HashMap<usize, Vec<EntityId>> = HashMap::new();
+    let mut component_id = 0usize;
+
+    for start in graph.node_indices() {
+        if visited.contains(&start) {
+            continue;
+        }
+
+        let mut queue = VecDeque::new();
+        queue.push_back(start);
+        visited.insert(start);
+        let mut members = Vec::new();
+
+        while let Some(node) = queue.pop_front() {
+            members.push(*graph.node_weight(node).unwrap());
+
+            for nb in graph.neighbors_directed(node, Direction::Outgoing) {
+                if visited.insert(nb) {
+                    queue.push_back(nb);
+                }
+            }
+            for nb in graph.neighbors_directed(node, Direction::Incoming) {
+                if visited.insert(nb) {
+                    queue.push_back(nb);
+                }
+            }
+        }
+
+        communities.insert(component_id, members);
+        component_id += 1;
     }
 
     communities
@@ -150,5 +191,21 @@ mod tests {
         let communities = label_propagation(&g);
         let total: usize = communities.values().map(|v| v.len()).sum();
         assert_eq!(total, 6);
+    }
+
+    #[test]
+    fn test_connected_component_communities() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_node(c);
+
+        let communities = connected_component_communities(&g);
+        assert_eq!(communities.len(), 2);
+        let mut sizes: Vec<usize> = communities.values().map(|v| v.len()).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![1, 2]);
     }
 }

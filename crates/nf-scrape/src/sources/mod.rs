@@ -1,11 +1,15 @@
 //! Source registry — holds all registered scrapers and can run them.
 
-pub mod fec;
 pub mod congress;
+pub mod fec;
+pub mod opensecrets_fec_bulk;
+pub mod pacer;
 pub mod recap;
 
-pub use fec::FecScraper;
 pub use congress::CongressScraper;
+pub use fec::FecScraper;
+pub use opensecrets_fec_bulk::OpenSecretsFecBulkScraper;
+pub use pacer::PacerScraper;
 pub use recap::RecapScraper;
 
 use nf_core::Entity;
@@ -20,7 +24,9 @@ pub struct SourceRegistry {
 
 impl SourceRegistry {
     pub fn new() -> Self {
-        Self { sources: Vec::new() }
+        Self {
+            sources: Vec::new(),
+        }
     }
 
     /// Register a scraper with the registry.

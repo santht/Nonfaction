@@ -51,7 +51,10 @@ impl TrustTier {
     }
 
     pub fn expedited_review(&self) -> bool {
-        matches!(self, TrustTier::Trusted | TrustTier::Verified | TrustTier::Maintainer)
+        matches!(
+            self,
+            TrustTier::Trusted | TrustTier::Verified | TrustTier::Maintainer
+        )
     }
 }
 
@@ -168,7 +171,10 @@ impl ReputationTracker {
     fn update_tier(&mut self, contributor_id: ContributorId) {
         if let Some(profile) = self.profiles.get_mut(&contributor_id) {
             // Don't demote maintainers or verified contributors
-            if matches!(profile.trust_tier, TrustTier::Maintainer | TrustTier::Verified) {
+            if matches!(
+                profile.trust_tier,
+                TrustTier::Maintainer | TrustTier::Verified
+            ) {
                 return;
             }
 
@@ -192,10 +198,7 @@ impl ReputationTracker {
         let now = Utc::now();
         let one_hour_ago = now - chrono::Duration::hours(1);
 
-        let recent = self
-            .recent_submissions
-            .entry(contributor_id)
-            .or_default();
+        let recent = self.recent_submissions.entry(contributor_id).or_default();
 
         // Prune old entries
         recent.retain(|t| *t > one_hour_ago);
@@ -268,13 +271,19 @@ mod tests {
         for _ in 0..5 {
             tracker.record_result(id, SubmissionId::new(), SubmissionStatus::Approved);
         }
-        assert_eq!(tracker.get_profile(id).unwrap().trust_tier, TrustTier::Established);
+        assert_eq!(
+            tracker.get_profile(id).unwrap().trust_tier,
+            TrustTier::Established
+        );
 
         // 20 total = 200 points = Trusted
         for _ in 0..15 {
             tracker.record_result(id, SubmissionId::new(), SubmissionStatus::Approved);
         }
-        assert_eq!(tracker.get_profile(id).unwrap().trust_tier, TrustTier::Trusted);
+        assert_eq!(
+            tracker.get_profile(id).unwrap().trust_tier,
+            TrustTier::Trusted
+        );
     }
 
     #[test]
@@ -326,7 +335,10 @@ mod tests {
     fn test_bad_faith_suspends() {
         let mut tracker = ReputationTracker::new();
         let id = tracker.register("malicious", "hash");
-        tracker.record_bad_faith(id, "intentionally submitting fabricated connections".to_string());
+        tracker.record_bad_faith(
+            id,
+            "intentionally submitting fabricated connections".to_string(),
+        );
         let profile = tracker.get_profile(id).unwrap();
         assert!(profile.suspended);
         assert_eq!(profile.reputation_score, -25);

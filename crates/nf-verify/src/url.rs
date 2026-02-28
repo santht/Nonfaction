@@ -1,4 +1,5 @@
 use crate::error::{VerifyError, VerifyResult};
+use std::time::Instant;
 use url::Url;
 
 /// Result of checking a URL's liveness
@@ -15,7 +16,39 @@ pub struct UrlVerifyResult {
     pub archive_url: Option<String>,
 }
 
+/// Result of archiving a URL via the Wayback Machine save API
+#[derive(Debug, Clone)]
+pub struct ArchiveSaveResult {
+    /// The original URL that was submitted for archival
+    pub original_url: String,
+    /// The Wayback Machine URL of the saved snapshot, if available immediately
+    pub snapshot_url: Option<String>,
+    /// Whether the save request was accepted (202) or already cached (200)
+    pub accepted: bool,
+    /// Raw job-id returned by the API, for async polling
+    pub job_id: Option<String>,
+}
+
+/// Result of checking a URL's freshness via response headers
+#[derive(Debug, Clone)]
+pub struct FreshnessResult {
+    pub url: String,
+    /// Whether the URL is currently accessible
+    pub is_accessible: bool,
+    /// `Last-Modified` header value, if returned
+    pub last_modified: Option<String>,
+    /// `ETag` header value, if returned
+    pub etag: Option<String>,
+    /// `Content-Type` header value
+    pub content_type: Option<String>,
+    /// Round-trip time in milliseconds for the HEAD request
+    pub response_time_ms: u64,
+    /// Final URL after any redirects
+    pub redirected_to: Option<String>,
+}
+
 const WAYBACK_API_BASE: &str = "https://archive.org/wayback/available";
+const WAYBACK_SAVE_BASE: &str = "https://web.archive.org/save";
 
 /// Check if a URL is live by sending a HEAD request.
 /// Also checks Internet Archive availability.
@@ -114,6 +147,147 @@ async fn check_wayback_availability(
     }
 }
 
+/// Submit a URL to the Wayback Machine save API to trigger archival.
+///
+/// Uses `GET {save_base}/{url}` which returns a redirect to the saved snapshot
+/// on success (HTTP 302/200) or indicates queued archival (HTTP 200 with job_id).
+pub async fn archive_url_wayback(
+    client: &reqwest::Client,
+    url_str: &str,
+) -> VerifyResult<ArchiveSaveResult> {
+    archive_url_wayback_with_base(client, url_str, WAYBACK_SAVE_BASE).await
+}
+
+/// Same as `archive_url_wayback` but with a configurable save API base URL (for testing).
+pub async fn archive_url_wayback_with_base(
+    client: &reqwest::Client,
+    url_str: &str,
+    save_base: &str,
+) -> VerifyResult<ArchiveSaveResult> {
+    Url::parse(url_str).map_err(|e| VerifyError::InvalidUrl(e.to_string()))?;
+
+    let save_url = format!("{}/{}", save_base, url_str);
+
+    // The Wayback Machine save endpoint is triggered by a simple GET.
+    // It responds with 200 (queued), 302 (already archived, redirect), or error.
+    let resp = client
+        .get(&save_url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(VerifyError::Http)?;
+
+    let status = resp.status().as_u16();
+    let accepted = status == 200 || status == 302 || status == 301;
+
+    // Extract snapshot URL from Content-Location or Location header
+    let snapshot_url = resp
+        .headers()
+        .get("Content-Location")
+        .or_else(|| resp.headers().get("Location"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            if s.starts_with("http") {
+                s.to_string()
+            } else {
+                format!("https://web.archive.org{}", s)
+            }
+        });
+
+    // Try to extract job_id from JSON body (async save responses)
+    let job_id = if accepted {
+        if let Ok(body) = resp.json::<serde_json::Value>().await {
+            body.get("job_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(ArchiveSaveResult {
+        original_url: url_str.to_string(),
+        snapshot_url,
+        accepted,
+        job_id,
+    })
+}
+
+/// Check the freshness of a URL by inspecting HTTP response headers.
+///
+/// Returns timing, `Last-Modified`, `ETag`, `Content-Type`, and redirect info.
+pub async fn check_freshness(
+    client: &reqwest::Client,
+    url_str: &str,
+) -> VerifyResult<FreshnessResult> {
+    Url::parse(url_str).map_err(|e| VerifyError::InvalidUrl(e.to_string()))?;
+
+    let start = Instant::now();
+
+    let resp = match client.head(url_str).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            if e.is_connect() || e.is_timeout() {
+                return Ok(FreshnessResult {
+                    url: url_str.to_string(),
+                    is_accessible: false,
+                    last_modified: None,
+                    etag: None,
+                    content_type: None,
+                    response_time_ms: start.elapsed().as_millis() as u64,
+                    redirected_to: None,
+                });
+            }
+            // HEAD not supported — try GET with range to minimise bandwidth
+            match client
+                .get(url_str)
+                .header("Range", "bytes=0-0")
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e2) => return Err(VerifyError::Http(e2)),
+            }
+        }
+    };
+
+    let elapsed = start.elapsed().as_millis() as u64;
+    let is_accessible = resp.status().is_success() || resp.status().as_u16() == 304;
+
+    let header_str = |name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+
+    let last_modified = header_str("Last-Modified");
+    let etag = header_str("ETag");
+    let content_type = header_str("Content-Type");
+
+    // Detect redirect: if the final URL differs from the input
+    let redirected_to = {
+        let final_url = resp.url().as_str().to_string();
+        if final_url != url_str {
+            Some(final_url)
+        } else {
+            None
+        }
+    };
+
+    Ok(FreshnessResult {
+        url: url_str.to_string(),
+        is_accessible,
+        last_modified,
+        etag,
+        content_type,
+        response_time_ms: elapsed,
+        redirected_to,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,8 +366,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_url() {
         let client = reqwest::Client::new();
-        let result = verify_url_with_wayback_base(&client, "not-a-url", "http://wayback")
-            .await;
+        let result = verify_url_with_wayback_base(&client, "not-a-url", "http://wayback").await;
         assert!(matches!(result, Err(VerifyError::InvalidUrl(_))));
     }
 
@@ -220,12 +393,114 @@ mod tests {
 
         let client = reqwest::Client::new();
         let target_url = server.uri();
-        let result =
-            verify_url_with_wayback_base(&client, &target_url, &wayback_server.uri())
-                .await
-                .unwrap();
+        let result = verify_url_with_wayback_base(&client, &target_url, &wayback_server.uri())
+            .await
+            .unwrap();
 
         assert!(result.is_live);
         assert!(!result.archive_available);
+    }
+
+    #[tokio::test]
+    async fn test_archive_url_wayback_accepted() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": "spn2-abc123",
+                "status": "pending",
+                "url": "https://example.com"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = archive_url_wayback_with_base(&client, "https://example.com", &server.uri())
+            .await
+            .unwrap();
+
+        assert!(result.accepted);
+        assert_eq!(result.original_url, "https://example.com");
+        assert_eq!(result.job_id.as_deref(), Some("spn2-abc123"));
+    }
+
+    #[tokio::test]
+    async fn test_archive_url_wayback_invalid_url() {
+        let client = reqwest::Client::new();
+        let result =
+            archive_url_wayback_with_base(&client, "not-a-url", "http://save.example").await;
+        assert!(matches!(result, Err(VerifyError::InvalidUrl(_))));
+    }
+
+    #[tokio::test]
+    async fn test_check_freshness_live_with_headers() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .append_header("Last-Modified", "Sat, 01 Jan 2024 00:00:00 GMT")
+                    .append_header("ETag", "\"abc123\"")
+                    .append_header("Content-Type", "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = check_freshness(&client, &server.uri()).await.unwrap();
+
+        assert!(result.is_accessible);
+        assert_eq!(
+            result.last_modified.as_deref(),
+            Some("Sat, 01 Jan 2024 00:00:00 GMT")
+        );
+        assert_eq!(result.etag.as_deref(), Some("\"abc123\""));
+        assert!(
+            result
+                .content_type
+                .as_deref()
+                .unwrap()
+                .contains("text/html")
+        );
+        assert!(result.response_time_ms < 5000);
+    }
+
+    #[tokio::test]
+    async fn test_check_freshness_no_headers() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = check_freshness(&client, &server.uri()).await.unwrap();
+
+        assert!(result.is_accessible);
+        assert!(result.last_modified.is_none());
+        assert!(result.etag.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_freshness_dead_url() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = check_freshness(&client, &server.uri()).await.unwrap();
+
+        assert!(!result.is_accessible);
+    }
+
+    #[tokio::test]
+    async fn test_check_freshness_invalid_url() {
+        let client = reqwest::Client::new();
+        let result = check_freshness(&client, "not-a-url").await;
+        assert!(matches!(result, Err(VerifyError::InvalidUrl(_))));
     }
 }

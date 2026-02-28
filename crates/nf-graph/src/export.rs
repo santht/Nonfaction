@@ -1,5 +1,5 @@
 use petgraph::visit::EdgeRef;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::graph::NfGraph;
 
@@ -132,10 +132,7 @@ mod tests {
 
         let dot = to_dot(&g);
         // Should have an arrow between the two UUIDs
-        let expected_edge = format!(
-            "\"{}\" -> \"{}\" [label=\"DonatedTo\"]",
-            a.0, b.0
-        );
+        let expected_edge = format!("\"{}\" -> \"{}\" [label=\"DonatedTo\"]", a.0, b.0);
         assert!(dot.contains(&expected_edge));
     }
 }

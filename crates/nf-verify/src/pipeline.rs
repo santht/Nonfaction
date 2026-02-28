@@ -1,6 +1,7 @@
 use crate::crossref::{CrossRefResult, crossref_person_with_base};
 use crate::error::{VerifyError, VerifyResult};
 use crate::fec::{FecVerifyResult, verify_fec_filing_with_base};
+use crate::result::VerificationResult;
 use crate::url::{UrlVerifyResult, verify_url_with_wayback_base};
 use nf_core::source::{SourceRef, SourceType};
 
@@ -87,9 +88,54 @@ pub async fn verify_person_by_name(
     name: &str,
     config: &VerifyConfig,
 ) -> VerifyResult<VerifyOutput> {
-    let result =
-        crossref_person_with_base(client, name, &config.opensanctions_api_base).await?;
+    let result = crossref_person_with_base(client, name, &config.opensanctions_api_base).await?;
     Ok(VerifyOutput::CrossRef(result))
+}
+
+/// Run the verification pipeline and wrap the result in a `VerificationResult`
+/// with evidence and confidence.
+pub async fn verify_source_with_result(
+    client: &reqwest::Client,
+    source: &SourceRef,
+    config: &VerifyConfig,
+) -> VerifyResult<VerificationResult> {
+    let output = verify_source(client, source, config).await?;
+    Ok(VerificationResult::from_output(output))
+}
+
+/// Verify multiple sources concurrently, returning one result per source.
+///
+/// Each source is verified independently; errors for individual sources are
+/// captured as `Err` values rather than failing the entire batch.
+pub async fn verify_batch(
+    client: &reqwest::Client,
+    sources: &[SourceRef],
+    config: &VerifyConfig,
+) -> Vec<VerifyResult<VerificationResult>> {
+    let handles: Vec<_> = sources
+        .iter()
+        .map(|source| {
+            let client = client.clone();
+            let config = config.clone();
+            let source = source.clone();
+            tokio::spawn(async move {
+                verify_source(&client, &source, &config)
+                    .await
+                    .map(VerificationResult::from_output)
+            })
+        })
+        .collect();
+
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => results.push(Err(VerifyError::NotApplicable(format!(
+                "Task panicked: {e}"
+            )))),
+        }
+    }
+    results
 }
 
 #[cfg(test)]
@@ -242,5 +288,98 @@ mod tests {
         let config = VerifyConfig::default();
         let result = verify_source(&client, &source, &config).await;
         assert!(matches!(result, Err(VerifyError::NotApplicable(_))));
+    }
+
+    #[tokio::test]
+    async fn test_verify_source_with_result_wraps_output() {
+        let url_server = MockServer::start().await;
+        let wayback_server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&url_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "archived_snapshots": {}
+            })))
+            .mount(&wayback_server)
+            .await;
+
+        let source = make_source_ref(
+            SourceType::GovernmentWebsite,
+            &format!("{}/doc", url_server.uri()),
+        );
+        let config = VerifyConfig {
+            wayback_api_base: wayback_server.uri(),
+            ..Default::default()
+        };
+
+        let client = reqwest::Client::new();
+        let result = verify_source_with_result(&client, &source, &config)
+            .await
+            .unwrap();
+
+        assert!(result.is_verified()); // live URL → confidence 0.85
+        assert!(result.confidence > 0.0);
+        assert!(result.verified_at > 0);
+        assert!(!result.evidence.summary.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_verify_batch_multiple_sources() {
+        let url_server = MockServer::start().await;
+        let wayback_server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&url_server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "archived_snapshots": {}
+            })))
+            .mount(&wayback_server)
+            .await;
+
+        let sources = vec![
+            make_source_ref(SourceType::GovernmentWebsite, &url_server.uri()),
+            make_source_ref(SourceType::GovernmentWebsite, &url_server.uri()),
+        ];
+        let config = VerifyConfig {
+            wayback_api_base: wayback_server.uri(),
+            ..Default::default()
+        };
+
+        let client = reqwest::Client::new();
+        let results = verify_batch(&client, &sources, &config).await;
+
+        assert_eq!(results.len(), 2);
+        for r in &results {
+            assert!(r.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_batch_empty_sources() {
+        let client = reqwest::Client::new();
+        let config = VerifyConfig::default();
+        let results = verify_batch(&client, &[], &config).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_verify_batch_fec_error_captured_per_item() {
+        // FEC source with no filing_id → error captured, not propagated
+        let source = make_source_ref(
+            SourceType::FecFiling,
+            "https://api.open.fec.gov/v1/filings/",
+        );
+        let client = reqwest::Client::new();
+        let config = VerifyConfig::default();
+        let results = verify_batch(&client, &[source], &config).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
     }
 }

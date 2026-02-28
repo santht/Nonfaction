@@ -2,10 +2,10 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use tantivy::{
+    DateTime as TantivyDateTime, ReloadPolicy, Score, SnippetGenerator, TantivyDocument, Term,
     collector::{Count, TopDocs},
     query::{BooleanQuery, Occur, QueryParser, RangeQuery, TermQuery},
     schema::{IndexRecordOption, OwnedValue},
-    DateTime as TantivyDateTime, ReloadPolicy, Score, SnippetGenerator, TantivyDocument, Term,
 };
 
 use crate::{error::SearchError, index::NfSchema};
@@ -46,7 +46,13 @@ pub struct SearchOptions {
 
 impl Default for SearchOptions {
     fn default() -> Self {
-        Self { entity_type: None, offset: 0, limit: 10, date_from: None, date_to: None }
+        Self {
+            entity_type: None,
+            offset: 0,
+            limit: 10,
+            date_from: None,
+            date_to: None,
+        }
     }
 }
 
@@ -91,7 +97,11 @@ impl NfSearcher {
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()?;
-        Ok(Self { reader, schema, index: index.clone() })
+        Ok(Self {
+            reader,
+            schema,
+            index: index.clone(),
+        })
     }
 
     /// Full-text search with optional entity-type and date-range filters.
@@ -106,23 +116,21 @@ impl NfSearcher {
         let s = &self.schema;
 
         // Parse the free-text query against name + content + tags.
-        let mut parser =
-            QueryParser::for_index(&self.index, vec![s.name, s.content, s.tags]);
+        let mut parser = QueryParser::for_index(&self.index, vec![s.name, s.content, s.tags]);
         parser.set_conjunction_by_default();
         let text_query = parser.parse_query(query_str)?;
 
         // Optionally restrict to a single entity type.
-        let filtered: Box<dyn tantivy::query::Query> =
-            if let Some(et) = &opts.entity_type {
-                let term = Term::from_field_text(s.entity_type, et);
-                let type_q = Box::new(TermQuery::new(term, IndexRecordOption::Basic));
-                Box::new(BooleanQuery::new(vec![
-                    (Occur::Must, text_query),
-                    (Occur::Must, type_q),
-                ]))
-            } else {
-                text_query
-            };
+        let filtered: Box<dyn tantivy::query::Query> = if let Some(et) = &opts.entity_type {
+            let term = Term::from_field_text(s.entity_type, et);
+            let type_q = Box::new(TermQuery::new(term, IndexRecordOption::Basic));
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Must, text_query),
+                (Occur::Must, type_q),
+            ]))
+        } else {
+            text_query
+        };
 
         // Optionally restrict to a date range.
         let final_query: Box<dyn tantivy::query::Query> =
@@ -148,13 +156,11 @@ impl NfSearcher {
             };
 
         let limit = opts.limit.max(1);
-        let top_docs = searcher
-            .search(&final_query, &TopDocs::with_limit(opts.offset + limit))?;
+        let top_docs = searcher.search(&final_query, &TopDocs::with_limit(opts.offset + limit))?;
 
         // Snippet generators (best-effort; ignored if the query has no matching terms).
         let name_snip = SnippetGenerator::create(&searcher, &*final_query, s.name).ok();
-        let content_snip =
-            SnippetGenerator::create(&searcher, &*final_query, s.content).ok();
+        let content_snip = SnippetGenerator::create(&searcher, &*final_query, s.content).ok();
 
         let mut results = Vec::new();
         for (score, addr) in top_docs.into_iter().skip(opts.offset) {
@@ -164,13 +170,16 @@ impl NfSearcher {
             let entity_type = text_field(&doc, s.entity_type).unwrap_or_default();
             let name = text_field(&doc, s.name).unwrap_or_default();
             let raw_urls = text_field(&doc, s.source_urls).unwrap_or_default();
-            let source_urls =
-                raw_urls.split_whitespace().map(str::to_owned).collect();
+            let source_urls = raw_urls.split_whitespace().map(str::to_owned).collect();
 
             let tags: Vec<String> = doc
                 .get_all(s.tags)
                 .filter_map(|v| {
-                    if let OwnedValue::Str(val) = v { Some(val.clone()) } else { None }
+                    if let OwnedValue::Str(val) = v {
+                        Some(val.clone())
+                    } else {
+                        None
+                    }
                 })
                 .collect();
 
@@ -182,7 +191,15 @@ impl NfSearcher {
                 }
             }
 
-            results.push(SearchResult { entity_id, entity_type, name, score, snippets, source_urls, tags });
+            results.push(SearchResult {
+                entity_id,
+                entity_type,
+                name,
+                score,
+                snippets,
+                source_urls,
+                tags,
+            });
         }
 
         Ok(results)
@@ -191,10 +208,7 @@ impl NfSearcher {
     /// Count results broken down by entity type for the given query string.
     ///
     /// Only entity types with at least one matching document are returned.
-    pub fn facet_by_type(
-        &self,
-        query_str: &str,
-    ) -> Result<Vec<(String, usize)>, SearchError> {
+    pub fn facet_by_type(&self, query_str: &str) -> Result<Vec<(String, usize)>, SearchError> {
         let searcher = self.reader.searcher();
         let s = &self.schema;
 
@@ -214,13 +228,11 @@ impl NfSearcher {
 
         let mut facets = Vec::new();
         for &et in TYPES {
-            let parser =
-                QueryParser::for_index(&self.index, vec![s.name, s.content]);
+            let parser = QueryParser::for_index(&self.index, vec![s.name, s.content]);
             let text_q = parser.parse_query(query_str)?;
 
             let type_term = Term::from_field_text(s.entity_type, et);
-            let type_q =
-                Box::new(TermQuery::new(type_term, IndexRecordOption::Basic));
+            let type_q = Box::new(TermQuery::new(type_term, IndexRecordOption::Basic));
 
             let combined = BooleanQuery::new(vec![
                 (Occur::Must, text_q),
@@ -247,6 +259,10 @@ impl NfSearcher {
 
 fn text_field(doc: &TantivyDocument, field: tantivy::schema::Field) -> Option<String> {
     doc.get_first(field).and_then(|v| {
-        if let OwnedValue::Str(s) = v { Some(s.clone()) } else { None }
+        if let OwnedValue::Str(s) = v {
+            Some(s.clone())
+        } else {
+            None
+        }
     })
 }

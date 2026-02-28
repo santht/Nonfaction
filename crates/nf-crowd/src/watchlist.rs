@@ -294,11 +294,7 @@ mod tests {
         );
 
         // This should NOT trigger (wrong alert type for relationship watch)
-        mgr.notify_entity_change(
-            entity,
-            AlertType::EntityUpdated,
-            "bio updated".to_string(),
-        );
+        mgr.notify_entity_change(entity, AlertType::EntityUpdated, "bio updated".to_string());
         assert_eq!(mgr.unread_alerts(user).len(), 0);
 
         // This SHOULD trigger
@@ -324,11 +320,7 @@ mod tests {
 
         mgr.unsubscribe(sub_id);
 
-        mgr.notify_entity_change(
-            entity,
-            AlertType::NewDocument,
-            "new document".to_string(),
-        );
+        mgr.notify_entity_change(entity, AlertType::NewDocument, "new document".to_string());
 
         assert_eq!(mgr.unread_alerts(user).len(), 0);
     }

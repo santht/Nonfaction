@@ -1,5 +1,8 @@
-use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use url::Url;
 use uuid::Uuid;
 
 use nf_core::entities::EntityId;
@@ -118,12 +121,14 @@ pub enum RejectionReason {
 #[derive(Debug)]
 pub struct SubmissionQueue {
     submissions: Vec<Submission>,
+    submissions_per_ip: HashMap<String, Vec<DateTime<Utc>>>,
 }
 
 impl SubmissionQueue {
     pub fn new() -> Self {
         Self {
             submissions: Vec::new(),
+            submissions_per_ip: HashMap::new(),
         }
     }
 
@@ -137,17 +142,43 @@ impl SubmissionQueue {
         reference_detail: String,
         description: String,
     ) -> CrowdResult<SubmissionId> {
-        // Validate required fields
-        if primary_source_url.is_empty() {
-            return Err(CrowdError::InvalidSource(
-                "primary source URL is required".to_string(),
-            ));
-        }
-        if reference_detail.is_empty() {
-            return Err(CrowdError::InvalidSource(
-                "reference detail (quote or page number) is required".to_string(),
-            ));
-        }
+        // Backwards-compatible fallback for call sites that do not yet supply source IP.
+        // Use contributor ID as a stable per-client key.
+        self.submit_with_ip(
+            contributor_id,
+            submission_type,
+            primary_source_url,
+            primary_source_type,
+            reference_detail,
+            description,
+            contributor_id.0.to_string(),
+        )
+    }
+
+    /// Submit a new connection/entity for review with source IP rate limiting
+    pub fn submit_with_ip(
+        &mut self,
+        contributor_id: ContributorId,
+        mut submission_type: SubmissionType,
+        primary_source_url: String,
+        primary_source_type: SourceType,
+        reference_detail: String,
+        description: String,
+        source_ip: String,
+    ) -> CrowdResult<SubmissionId> {
+        let primary_source_url = sanitize_text(primary_source_url);
+        let reference_detail = sanitize_text(reference_detail);
+        let description = sanitize_text(description);
+        let source_ip = sanitize_text(source_ip);
+
+        validate_required_field("primary source URL", &primary_source_url)?;
+        validate_required_field("reference detail (quote or page number)", &reference_detail)?;
+        validate_required_field("description", &description)?;
+        validate_required_field("source IP", &source_ip)?;
+        validate_url("primary source URL", &primary_source_url)?;
+        validate_submission_type(&mut submission_type)?;
+
+        self.check_ip_rate_limit(&source_ip)?;
 
         let id = SubmissionId::new();
         let now = Utc::now();
@@ -198,11 +229,7 @@ impl SubmissionQueue {
             .find(|s| s.id == submission_id)
             .ok_or_else(|| CrowdError::NotFound(format!("submission {}", submission_id.0)))?;
 
-        if sub.status != SubmissionStatus::Pending {
-            return Err(CrowdError::Rejected {
-                reason: format!("submission is {:?}, not Pending", sub.status),
-            });
-        }
+        validate_status_transition(sub.status, SubmissionStatus::InReview)?;
 
         sub.status = SubmissionStatus::InReview;
         sub.reviewer_id = Some(reviewer_id);
@@ -222,11 +249,7 @@ impl SubmissionQueue {
             .find(|s| s.id == submission_id)
             .ok_or_else(|| CrowdError::NotFound(format!("submission {}", submission_id.0)))?;
 
-        if sub.status != SubmissionStatus::InReview {
-            return Err(CrowdError::Rejected {
-                reason: "submission must be InReview to approve".to_string(),
-            });
-        }
+        validate_status_transition(sub.status, SubmissionStatus::Approved)?;
 
         sub.status = SubmissionStatus::Approved;
         sub.reviewer_id = Some(reviewer_id);
@@ -248,11 +271,7 @@ impl SubmissionQueue {
             .find(|s| s.id == submission_id)
             .ok_or_else(|| CrowdError::NotFound(format!("submission {}", submission_id.0)))?;
 
-        if sub.status != SubmissionStatus::InReview {
-            return Err(CrowdError::Rejected {
-                reason: "submission must be InReview to reject".to_string(),
-            });
-        }
+        validate_status_transition(sub.status, SubmissionStatus::Rejected)?;
 
         sub.status = SubmissionStatus::Rejected;
         sub.reviewer_id = Some(reviewer_id);
@@ -273,11 +292,7 @@ impl SubmissionQueue {
             .find(|s| s.id == submission_id)
             .ok_or_else(|| CrowdError::NotFound(format!("submission {}", submission_id.0)))?;
 
-        if sub.status != SubmissionStatus::Rejected {
-            return Err(CrowdError::Rejected {
-                reason: "only rejected submissions can be disputed".to_string(),
-            });
-        }
+        validate_status_transition(sub.status, SubmissionStatus::Disputed)?;
 
         sub.status = SubmissionStatus::Disputed;
         sub.review_note = Some(format!(
@@ -301,6 +316,135 @@ impl SubmissionQueue {
             .filter(|s| s.status == status)
             .count()
     }
+
+    fn check_ip_rate_limit(&mut self, source_ip: &str) -> CrowdResult<()> {
+        const MAX_SUBMISSIONS_PER_IP_PER_HOUR: usize = 10;
+        let now = Utc::now();
+        let one_hour_ago = now - Duration::hours(1);
+
+        let recent_submissions = self
+            .submissions_per_ip
+            .entry(source_ip.to_string())
+            .or_default();
+        recent_submissions.retain(|ts| *ts > one_hour_ago);
+
+        if recent_submissions.len() >= MAX_SUBMISSIONS_PER_IP_PER_HOUR {
+            return Err(CrowdError::RateLimited(format!(
+                "max {MAX_SUBMISSIONS_PER_IP_PER_HOUR} submissions per IP per hour"
+            )));
+        }
+
+        recent_submissions.push(now);
+        Ok(())
+    }
+}
+
+fn validate_required_field(field_name: &str, value: &str) -> CrowdResult<()> {
+    if value.is_empty() {
+        return Err(CrowdError::InvalidSource(format!(
+            "{field_name} is required"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_url(field_name: &str, value: &str) -> CrowdResult<()> {
+    let parsed = Url::parse(value)
+        .map_err(|_| CrowdError::InvalidSource(format!("{field_name} must be a valid URL")))?;
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(CrowdError::InvalidSource(format!(
+            "{field_name} must use http or https"
+        )));
+    }
+
+    if parsed.host_str().is_none() {
+        return Err(CrowdError::InvalidSource(format!(
+            "{field_name} must include a host"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_status_transition(
+    current: SubmissionStatus,
+    target: SubmissionStatus,
+) -> CrowdResult<()> {
+    let valid = matches!(
+        (current, target),
+        (SubmissionStatus::Pending, SubmissionStatus::InReview)
+            | (SubmissionStatus::InReview, SubmissionStatus::Approved)
+            | (SubmissionStatus::InReview, SubmissionStatus::Rejected)
+            | (SubmissionStatus::Rejected, SubmissionStatus::Disputed)
+    );
+
+    if valid {
+        return Ok(());
+    }
+
+    let reason = if target == SubmissionStatus::Disputed {
+        "only rejected submissions can be disputed".to_string()
+    } else {
+        format!("invalid status transition: {current:?} -> {target:?}")
+    };
+
+    Err(CrowdError::Rejected { reason })
+}
+
+fn validate_submission_type(submission_type: &mut SubmissionType) -> CrowdResult<()> {
+    match submission_type {
+        SubmissionType::NewConnection { .. } => {}
+        SubmissionType::NewEntity { entity_type, .. } => {
+            *entity_type = sanitize_text(entity_type.clone());
+            validate_required_field("entity type", entity_type)?;
+        }
+        SubmissionType::Correction {
+            field,
+            current_value,
+            proposed_value,
+            ..
+        } => {
+            *field = sanitize_text(field.clone());
+            *current_value = sanitize_text(current_value.clone());
+            *proposed_value = sanitize_text(proposed_value.clone());
+            validate_required_field("correction field", field)?;
+            validate_required_field("current value", current_value)?;
+            validate_required_field("proposed value", proposed_value)?;
+        }
+        SubmissionType::ConductComparison {
+            official_action,
+            equivalent_private_conduct,
+            documented_consequence,
+            consequence_source_url,
+            ..
+        } => {
+            *official_action = sanitize_text(official_action.clone());
+            *equivalent_private_conduct = sanitize_text(equivalent_private_conduct.clone());
+            *documented_consequence = sanitize_text(documented_consequence.clone());
+            *consequence_source_url = sanitize_text(consequence_source_url.clone());
+            validate_required_field("official action", official_action)?;
+            validate_required_field("equivalent private conduct", equivalent_private_conduct)?;
+            validate_required_field("documented consequence", documented_consequence)?;
+            validate_required_field("consequence source URL", consequence_source_url)?;
+            validate_url("consequence source URL", consequence_source_url)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn sanitize_text(input: String) -> String {
+    let without_control_chars: String = input
+        .chars()
+        .filter(|c| !c.is_control() || c.is_whitespace())
+        .collect();
+
+    without_control_chars
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -368,6 +512,185 @@ mod tests {
     }
 
     #[test]
+    fn test_submit_requires_description() {
+        let mut queue = SubmissionQueue::new();
+        let result = queue.submit(
+            ContributorId::new(),
+            SubmissionType::NewEntity {
+                entity_type: "Person".to_string(),
+                entity_data: serde_json::json!({"name": "Test"}),
+            },
+            "https://example.gov/filing".to_string(),
+            SourceType::FecFiling,
+            "ref".to_string(),
+            "   ".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_submit_rejects_invalid_primary_source_url() {
+        let mut queue = SubmissionQueue::new();
+        let result = queue.submit(
+            ContributorId::new(),
+            SubmissionType::NewEntity {
+                entity_type: "Person".to_string(),
+                entity_data: serde_json::json!({"name": "Test"}),
+            },
+            "notaurl".to_string(),
+            SourceType::FecFiling,
+            "ref".to_string(),
+            "desc".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_submit_rejects_non_http_source_url() {
+        let mut queue = SubmissionQueue::new();
+        let result = queue.submit(
+            ContributorId::new(),
+            SubmissionType::NewEntity {
+                entity_type: "Person".to_string(),
+                entity_data: serde_json::json!({"name": "Test"}),
+            },
+            "ftp://example.gov/filing".to_string(),
+            SourceType::FecFiling,
+            "ref".to_string(),
+            "desc".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_submit_sanitizes_text_fields() {
+        let mut queue = SubmissionQueue::new();
+        let contributor = ContributorId::new();
+
+        let id = queue
+            .submit(
+                contributor,
+                SubmissionType::NewEntity {
+                    entity_type: " Person \n".to_string(),
+                    entity_data: serde_json::json!({"name": "Test"}),
+                },
+                "  https://example.gov/filing  ".to_string(),
+                SourceType::FecFiling,
+                " line 12 \n\n quote ".to_string(),
+                "  some\t\t description \n here ".to_string(),
+            )
+            .unwrap();
+
+        let stored = queue.get(id).unwrap();
+        assert_eq!(stored.primary_source_url, "https://example.gov/filing");
+        assert_eq!(stored.reference_detail, "line 12 quote");
+        assert_eq!(stored.description, "some description here");
+
+        match &stored.submission_type {
+            SubmissionType::NewEntity { entity_type, .. } => assert_eq!(entity_type, "Person"),
+            _ => panic!("expected NewEntity"),
+        }
+    }
+
+    #[test]
+    fn test_submit_validates_conduct_comparison_url() {
+        let mut queue = SubmissionQueue::new();
+        let result = queue.submit(
+            ContributorId::new(),
+            SubmissionType::ConductComparison {
+                official_action: "Action".to_string(),
+                official_id: EntityId::new(),
+                equivalent_private_conduct: "Conduct".to_string(),
+                documented_consequence: "Consequence".to_string(),
+                consequence_source_url: "javascript:alert(1)".to_string(),
+            },
+            "https://example.gov/filing".to_string(),
+            SourceType::CourtRecord,
+            "ref".to_string(),
+            "desc".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_submit_with_ip_rate_limited_after_ten() {
+        let mut queue = SubmissionQueue::new();
+        let contributor = ContributorId::new();
+        let ip = "203.0.113.5".to_string();
+
+        for _ in 0..10 {
+            queue
+                .submit_with_ip(
+                    contributor,
+                    SubmissionType::NewEntity {
+                        entity_type: "Person".to_string(),
+                        entity_data: serde_json::json!({"name": "Test"}),
+                    },
+                    "https://example.gov/filing".to_string(),
+                    SourceType::FecFiling,
+                    "ref".to_string(),
+                    "desc".to_string(),
+                    ip.clone(),
+                )
+                .unwrap();
+        }
+
+        let result = queue.submit_with_ip(
+            contributor,
+            SubmissionType::NewEntity {
+                entity_type: "Person".to_string(),
+                entity_data: serde_json::json!({"name": "Test"}),
+            },
+            "https://example.gov/filing-2".to_string(),
+            SourceType::FecFiling,
+            "ref".to_string(),
+            "desc".to_string(),
+            ip,
+        );
+
+        assert!(matches!(result, Err(CrowdError::RateLimited(_))));
+    }
+
+    #[test]
+    fn test_submit_with_ip_rate_limit_is_per_ip() {
+        let mut queue = SubmissionQueue::new();
+        let contributor = ContributorId::new();
+
+        for _ in 0..10 {
+            queue
+                .submit_with_ip(
+                    contributor,
+                    SubmissionType::NewEntity {
+                        entity_type: "Person".to_string(),
+                        entity_data: serde_json::json!({"name": "Test"}),
+                    },
+                    "https://example.gov/filing".to_string(),
+                    SourceType::FecFiling,
+                    "ref".to_string(),
+                    "desc".to_string(),
+                    "198.51.100.10".to_string(),
+                )
+                .unwrap();
+        }
+
+        let result = queue.submit_with_ip(
+            contributor,
+            SubmissionType::NewEntity {
+                entity_type: "Person".to_string(),
+                entity_data: serde_json::json!({"name": "Test"}),
+            },
+            "https://example.gov/filing".to_string(),
+            SourceType::FecFiling,
+            "ref".to_string(),
+            "desc".to_string(),
+            "198.51.100.11".to_string(),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_full_submission_workflow() {
         let (mut queue, _contributor, sub_id) = make_queue_with_submission();
         let reviewer = ContributorId::new();
@@ -376,11 +699,17 @@ mod tests {
 
         // Claim
         queue.claim_for_review(sub_id, reviewer).unwrap();
-        assert_eq!(queue.get(sub_id).unwrap().status, SubmissionStatus::InReview);
+        assert_eq!(
+            queue.get(sub_id).unwrap().status,
+            SubmissionStatus::InReview
+        );
 
         // Approve
         queue.approve(sub_id, reviewer).unwrap();
-        assert_eq!(queue.get(sub_id).unwrap().status, SubmissionStatus::Approved);
+        assert_eq!(
+            queue.get(sub_id).unwrap().status,
+            SubmissionStatus::Approved
+        );
         assert_eq!(queue.count_by_status(SubmissionStatus::Approved), 1);
     }
 
@@ -401,7 +730,12 @@ mod tests {
 
         let sub = queue.get(sub_id).unwrap();
         assert_eq!(sub.status, SubmissionStatus::Rejected);
-        assert!(sub.review_note.as_ref().unwrap().contains("NotPrimarySource"));
+        assert!(
+            sub.review_note
+                .as_ref()
+                .unwrap()
+                .contains("NotPrimarySource")
+        );
     }
 
     #[test]
@@ -427,7 +761,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(queue.get(sub_id).unwrap().status, SubmissionStatus::Disputed);
+        assert_eq!(
+            queue.get(sub_id).unwrap().status,
+            SubmissionStatus::Disputed
+        );
     }
 
     #[test]
@@ -444,6 +781,48 @@ mod tests {
         queue.claim_for_review(sub_id, reviewer).unwrap();
         queue.approve(sub_id, reviewer).unwrap();
         let result = queue.dispute(sub_id, "evidence".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cannot_reject_pending() {
+        let (mut queue, _contributor, sub_id) = make_queue_with_submission();
+        let reviewer = ContributorId::new();
+        let result = queue.reject(
+            sub_id,
+            reviewer,
+            RejectionReason::Incomplete,
+            "not enough detail".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cannot_claim_approved() {
+        let (mut queue, _contributor, sub_id) = make_queue_with_submission();
+        let reviewer = ContributorId::new();
+        queue.claim_for_review(sub_id, reviewer).unwrap();
+        queue.approve(sub_id, reviewer).unwrap();
+
+        let result = queue.claim_for_review(sub_id, reviewer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cannot_approve_rejected() {
+        let (mut queue, _contributor, sub_id) = make_queue_with_submission();
+        let reviewer = ContributorId::new();
+        queue.claim_for_review(sub_id, reviewer).unwrap();
+        queue
+            .reject(
+                sub_id,
+                reviewer,
+                RejectionReason::SourceDoesNotSupport,
+                "not supported".to_string(),
+            )
+            .unwrap();
+
+        let result = queue.approve(sub_id, reviewer);
         assert!(result.is_err());
     }
 

@@ -1,9 +1,10 @@
-use crate::csv::{parse_csv, CsvExtracted};
+use crate::csv::{CsvExtracted, parse_csv};
 use crate::error::{IngestError, IngestResult};
-use crate::html::{extract_html, HtmlExtracted};
-use crate::pdf::{extract_pdf, PdfExtracted};
+use crate::html::{HtmlExtracted, extract_html};
+use crate::pdf::{PdfExtracted, extract_pdf};
 use crate::table::Table;
 use nf_core::source::ContentHash;
+use std::collections::HashSet;
 
 /// The extracted content returned by the ingestion pipeline
 #[derive(Debug)]
@@ -130,6 +131,49 @@ pub fn ingest(bytes: &[u8], mime_type: &str) -> IngestResult<IngestOutput> {
     })
 }
 
+/// Tracks previously-seen document content hashes to detect duplicate ingestions.
+///
+/// Two documents are considered duplicates when their `ContentHash` values
+/// are equal — i.e. their raw bytes are byte-for-byte identical.
+#[derive(Debug, Default)]
+pub struct DeduplicationStore {
+    seen: HashSet<String>,
+}
+
+impl DeduplicationStore {
+    /// Create a new, empty deduplication store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `true` if `hash` has been seen before; inserts it if not.
+    pub fn is_duplicate(&mut self, hash: &ContentHash) -> bool {
+        !self.seen.insert(hash.0.clone())
+    }
+
+    /// Returns `true` if `bytes` hash to a content hash already in the store.
+    /// Computes and (if new) records the hash.
+    pub fn check_bytes(&mut self, bytes: &[u8]) -> bool {
+        let hash = ContentHash::compute(bytes);
+        self.is_duplicate(&hash)
+    }
+
+    /// Number of unique documents seen so far.
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Returns `true` if no documents have been registered yet.
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    /// Clear all stored hashes.
+    pub fn clear(&mut self) {
+        self.seen.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +265,70 @@ mod tests {
         let text = b"some text";
         let output = ingest(text, "text/plain").unwrap();
         assert!(output.content.page_count().is_none());
+    }
+
+    // ── DeduplicationStore tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_dedup_new_is_empty() {
+        let store = DeduplicationStore::new();
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn test_dedup_first_document_not_duplicate() {
+        let mut store = DeduplicationStore::new();
+        let hash = ContentHash::compute(b"hello world");
+        assert!(!store.is_duplicate(&hash));
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn test_dedup_same_content_is_duplicate() {
+        let mut store = DeduplicationStore::new();
+        let hash = ContentHash::compute(b"hello world");
+        store.is_duplicate(&hash);
+        assert!(store.is_duplicate(&hash));
+    }
+
+    #[test]
+    fn test_dedup_different_content_not_duplicate() {
+        let mut store = DeduplicationStore::new();
+        let h1 = ContentHash::compute(b"document one");
+        let h2 = ContentHash::compute(b"document two");
+        assert!(!store.is_duplicate(&h1));
+        assert!(!store.is_duplicate(&h2));
+        assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_check_bytes() {
+        let mut store = DeduplicationStore::new();
+        assert!(!store.check_bytes(b"first document"));
+        assert!(store.check_bytes(b"first document"));
+        assert!(!store.check_bytes(b"second document"));
+    }
+
+    #[test]
+    fn test_dedup_clear() {
+        let mut store = DeduplicationStore::new();
+        store.check_bytes(b"content");
+        assert_eq!(store.len(), 1);
+        store.clear();
+        assert!(store.is_empty());
+        // Same content is no longer considered a duplicate after clearing
+        assert!(!store.check_bytes(b"content"));
+    }
+
+    #[test]
+    fn test_dedup_ingest_integration() {
+        // Real ingest pipeline hashes → dedup store integration
+        let mut store = DeduplicationStore::new();
+        let bytes = b"The quick brown fox";
+        let out = ingest(bytes, "text/plain").unwrap();
+        assert!(!store.is_duplicate(&out.metadata.content_hash));
+        let out2 = ingest(bytes, "text/plain").unwrap();
+        assert!(store.is_duplicate(&out2.metadata.content_hash));
     }
 }

@@ -19,10 +19,10 @@ mod tests {
     use chrono::NaiveDate;
     use nf_core::{
         entities::{
-            CaseType, CourtCase, ConductComparison, Document, DocumentType, Entity, EntityId,
-            EntityMeta, FlightLogEntry, Organization, OrganizationType, Pardon, Payment,
-            PaymentType, Person, PolicyDecision, PolicyDecisionType, PublicStatement,
-            StatementPlatform, TimingCorrelation, CorrelationType,
+            CaseType, ConductComparison, CorrelationType, CourtCase, Document, DocumentType,
+            Entity, EntityId, EntityMeta, FlightLogEntry, Organization, OrganizationType, Pardon,
+            Payment, PaymentType, Person, PolicyDecision, PolicyDecisionType, PublicStatement,
+            StatementPlatform, TimingCorrelation,
         },
         source::{ContentHash, SourceChain, SourceRef, SourceType},
     };
@@ -34,7 +34,12 @@ mod tests {
 
     fn source_chain() -> SourceChain {
         let url = Url::parse("https://example.gov/source/1").unwrap();
-        let src = SourceRef::new(url, ContentHash::compute(b"test"), SourceType::FecFiling, "test");
+        let src = SourceRef::new(
+            url,
+            ContentHash::compute(b"test"),
+            SourceType::FecFiling,
+            "test",
+        );
         SourceChain::new(src)
     }
 
@@ -60,7 +65,11 @@ mod tests {
     }
 
     fn make_org(name: &str) -> Entity {
-        Entity::Organization(Organization::new(name, OrganizationType::Pac, source_chain()))
+        Entity::Organization(Organization::new(
+            name,
+            OrganizationType::Pac,
+            source_chain(),
+        ))
     }
 
     fn make_document(title: &str, content: &str, date: NaiveDate) -> Entity {
@@ -210,8 +219,7 @@ mod tests {
         assert!(index.is_ok());
         // Opening again (already exists) should also work.
         let schema2 = NfSchema::build();
-        let index2 =
-            open_or_create_index(&schema2, IndexDirectory::Mmap(dir.path().to_path_buf()));
+        let index2 = open_or_create_index(&schema2, IndexDirectory::Mmap(dir.path().to_path_buf()));
         assert!(index2.is_ok());
     }
 
@@ -236,16 +244,24 @@ mod tests {
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema.clone()).unwrap();
         // Each entity type should be individually retrievable.
-        let opts = SearchOptions::new().with_limit(5).with_entity_type("Person");
+        let opts = SearchOptions::new()
+            .with_limit(5)
+            .with_entity_type("Person");
         let r = searcher.search("Alice", &opts).unwrap();
         assert_eq!(r.len(), 1);
-        let opts = SearchOptions::new().with_limit(5).with_entity_type("Organization");
+        let opts = SearchOptions::new()
+            .with_limit(5)
+            .with_entity_type("Organization");
         let r = searcher.search("Alpha", &opts).unwrap();
         assert_eq!(r.len(), 1);
-        let opts = SearchOptions::new().with_limit(5).with_entity_type("Document");
+        let opts = SearchOptions::new()
+            .with_limit(5)
+            .with_entity_type("Document");
         let r = searcher.search("campaign", &opts).unwrap();
         assert_eq!(r.len(), 1);
-        let opts = SearchOptions::new().with_limit(5).with_entity_type("Payment");
+        let opts = SearchOptions::new()
+            .with_limit(5)
+            .with_entity_type("Payment");
         let r = searcher.search("contribution", &opts).unwrap();
         assert_eq!(r.len(), 1);
     }
@@ -256,8 +272,9 @@ mod tests {
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
-        let results =
-            searcher.search("Jane", &SearchOptions::new().with_limit(10)).unwrap();
+        let results = searcher
+            .search("Jane", &SearchOptions::new().with_limit(10))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entity_type, "Person");
         assert!(results[0].name.contains("Jane Smith"));
@@ -269,8 +286,9 @@ mod tests {
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
-        let results =
-            searcher.search("Influence", &SearchOptions::new().with_limit(10)).unwrap();
+        let results = searcher
+            .search("Influence", &SearchOptions::new().with_limit(10))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entity_type, "Organization");
     }
@@ -286,8 +304,9 @@ mod tests {
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
-        let results =
-            searcher.search("lobbying", &SearchOptions::new().with_limit(10)).unwrap();
+        let results = searcher
+            .search("lobbying", &SearchOptions::new().with_limit(10))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entity_type, "Document");
     }
@@ -299,7 +318,9 @@ mod tests {
 
         let mut person = Person::new("Bob Jones", source_chain());
         let _entity_id = person.meta.id;
-        indexer.index_entity(&Entity::Person(person.clone())).unwrap();
+        indexer
+            .index_entity(&Entity::Person(person.clone()))
+            .unwrap();
         indexer.commit().unwrap();
 
         // Update the name and re-index.
@@ -346,8 +367,9 @@ mod tests {
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
-        let results =
-            searcher.search("David", &SearchOptions::new().with_limit(10)).unwrap();
+        let results = searcher
+            .search("David", &SearchOptions::new().with_limit(10))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entity_id, entity_uuid);
         assert_eq!(results[0].entity_type, "Person");
@@ -359,8 +381,9 @@ mod tests {
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
-        let results =
-            searcher.search("xyzzy", &SearchOptions::new().with_limit(10)).unwrap();
+        let results = searcher
+            .search("xyzzy", &SearchOptions::new().with_limit(10))
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -374,8 +397,9 @@ mod tests {
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
-        let results =
-            searcher.search("donation", &SearchOptions::new().with_limit(10)).unwrap();
+        let results = searcher
+            .search("donation", &SearchOptions::new().with_limit(10))
+            .unwrap();
         assert!(!results.is_empty());
         for r in &results {
             assert!(r.score > 0.0, "score should be positive");
@@ -413,10 +437,16 @@ mod tests {
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
         let facets = searcher.facet_by_type("black").unwrap();
-        let person_count =
-            facets.iter().find(|(t, _)| t == "Person").map(|(_, c)| *c).unwrap_or(0);
-        let org_count =
-            facets.iter().find(|(t, _)| t == "Organization").map(|(_, c)| *c).unwrap_or(0);
+        let person_count = facets
+            .iter()
+            .find(|(t, _)| t == "Person")
+            .map(|(_, c)| *c)
+            .unwrap_or(0);
+        let org_count = facets
+            .iter()
+            .find(|(t, _)| t == "Organization")
+            .map(|(_, c)| *c)
+            .unwrap_or(0);
         assert_eq!(person_count, 2);
         assert_eq!(org_count, 1);
     }
@@ -425,7 +455,9 @@ mod tests {
 
     #[test]
     fn test_pagination_limit() {
-        let entities: Vec<Entity> = (0..10).map(|i| make_person(&format!("Person {i}"))).collect();
+        let entities: Vec<Entity> = (0..10)
+            .map(|i| make_person(&format!("Person {i}")))
+            .collect();
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
@@ -437,12 +469,15 @@ mod tests {
 
     #[test]
     fn test_pagination_offset() {
-        let entities: Vec<Entity> = (0..10).map(|i| make_person(&format!("Person {i}"))).collect();
+        let entities: Vec<Entity> = (0..10)
+            .map(|i| make_person(&format!("Person {i}")))
+            .collect();
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
-        let page1 =
-            searcher.search("Person", &SearchOptions::new().with_limit(5)).unwrap();
+        let page1 = searcher
+            .search("Person", &SearchOptions::new().with_limit(5))
+            .unwrap();
         let page2 = searcher
             .search("Person", &SearchOptions::new().with_limit(5).with_offset(5))
             .unwrap();
@@ -450,10 +485,8 @@ mod tests {
         assert_eq!(page1.len(), 5);
         assert_eq!(page2.len(), 5);
 
-        let ids1: std::collections::HashSet<_> =
-            page1.iter().map(|r| &r.entity_id).collect();
-        let ids2: std::collections::HashSet<_> =
-            page2.iter().map(|r| &r.entity_id).collect();
+        let ids1: std::collections::HashSet<_> = page1.iter().map(|r| &r.entity_id).collect();
+        let ids2: std::collections::HashSet<_> = page2.iter().map(|r| &r.entity_id).collect();
         // Pages should not overlap.
         assert!(ids1.is_disjoint(&ids2));
     }
@@ -471,7 +504,9 @@ mod tests {
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
-        let opts = SearchOptions::new().with_limit(10).with_entity_type("Person");
+        let opts = SearchOptions::new()
+            .with_limit(10)
+            .with_entity_type("Person");
         let results = searcher.search("gray", &opts).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entity_type, "Person");
@@ -529,7 +564,11 @@ mod tests {
         let entity_type_val = doc
             .get_first(schema.entity_type)
             .and_then(|v| {
-                if let tantivy::schema::OwnedValue::Str(s) = v { Some(s.clone()) } else { None }
+                if let tantivy::schema::OwnedValue::Str(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
             })
             .unwrap_or_default();
         assert_eq!(entity_type_val, "Person");
@@ -549,13 +588,8 @@ mod tests {
 
         let from = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
         let to = NaiveDate::from_ymd_opt(2023, 12, 31).unwrap();
-        let query = QueryBuilder::search_by_type_and_date(
-            &schema,
-            &index,
-            "Payment",
-            Some(from),
-            Some(to),
-        );
+        let query =
+            QueryBuilder::search_by_type_and_date(&schema, &index, "Payment", Some(from), Some(to));
 
         let searcher_obj = index.reader().unwrap().searcher();
         let top_docs = searcher_obj
@@ -570,8 +604,9 @@ mod tests {
         let target_id = entities[0].entity_id().0.to_string();
         let (index, schema) = setup(&entities);
 
-        let query =
-            QueryBuilder::new(&schema, &index).with_entity_id(&target_id).build();
+        let query = QueryBuilder::new(&schema, &index)
+            .with_entity_id(&target_id)
+            .build();
 
         let searcher_obj = index.reader().unwrap().searcher();
         let top_docs = searcher_obj
@@ -601,8 +636,9 @@ mod tests {
         let (index, schema) = setup(&entities);
         let searcher = NfSearcher::new(&index, schema).unwrap();
 
-        let results =
-            searcher.search("Mike", &SearchOptions::new().with_limit(10)).unwrap();
+        let results = searcher
+            .search("Mike", &SearchOptions::new().with_limit(10))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(!results[0].source_urls.is_empty());
         assert!(results[0].source_urls[0].starts_with("https://"));
@@ -621,10 +657,10 @@ mod tests {
         indexer.commit().unwrap();
 
         let searcher = NfSearcher::new(&index, schema).unwrap();
-        let results =
-            searcher.search("senator", &SearchOptions::new().with_limit(10)).unwrap();
+        let results = searcher
+            .search("senator", &SearchOptions::new().with_limit(10))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].tags.contains(&"senator".to_owned()));
     }
 }
-

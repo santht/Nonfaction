@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use nf_crowd::submission::SubmissionQueue;
 use nf_search::{NfSchema, NfSearcher};
-use nf_store::repository::{EntityRepository, RelationshipRepository};
 use nf_store::DbPool;
+use nf_store::repository::{EntityRepository, RelationshipRepository};
 
 use crate::handlers::watchlist::WatchlistStore;
 
@@ -20,6 +21,8 @@ pub struct AppState {
     pub search_schema: Arc<NfSchema>,
     /// In-memory watchlist store.
     pub watchlist: WatchlistStore,
+    /// Crowd-sourced submission queue.
+    pub submission_queue: Arc<Mutex<SubmissionQueue>>,
 }
 
 impl AppState {
@@ -36,6 +39,7 @@ impl AppState {
             searcher: Arc::new(searcher),
             search_schema,
             watchlist: WatchlistStore::new(),
+            submission_queue: Arc::new(Mutex::new(SubmissionQueue::new())),
         })
     }
 }

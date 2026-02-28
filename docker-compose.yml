@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nf-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: nonfaction
+      POSTGRES_USER: nonfaction
+      POSTGRES_PASSWORD: nonfaction
+    volumes:
+      - nf-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nonfaction"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  nf-pgdata:

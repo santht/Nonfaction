@@ -1,4 +1,4 @@
-//! Core scraper framework: trait, rate limiter, retry, deduplication.
+//! Core scraper framework: traits, rate limiter, retry, deduplication.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use reqwest::header::RETRY_AFTER;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, warn};
@@ -22,6 +23,13 @@ pub enum ScrapeError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("HTTP status {status} for {url}: {body}")]
+    HttpStatus {
+        url: String,
+        status: u16,
+        body: String,
+    },
+
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -31,8 +39,12 @@ pub enum ScrapeError {
     #[error("URL already seen (dedup): {0}")]
     Duplicate(String),
 
-    #[error("max retries exceeded for {url}: {cause}")]
-    MaxRetriesExceeded { url: String, cause: String },
+    #[error("max retries exceeded for {url} after {attempts} attempts: {cause}")]
+    MaxRetriesExceeded {
+        url: String,
+        attempts: u32,
+        cause: String,
+    },
 
     #[error("configuration error: {0}")]
     Config(String),
@@ -195,6 +207,19 @@ impl ScraperRuntime {
     ///
     /// Returns `None` if the URL was already fetched (dedup suppression).
     pub async fn fetch_json(&self, url: &Url) -> ScrapeResult<Option<serde_json::Value>> {
+        self.fetch_json_with(url, |request| request).await
+    }
+
+    /// Same as `fetch_json`, but lets callers modify the request builder
+    /// (e.g. inject auth headers) before each attempt.
+    pub async fn fetch_json_with<F>(
+        &self,
+        url: &Url,
+        configure_request: F,
+    ) -> ScrapeResult<Option<serde_json::Value>>
+    where
+        F: Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    {
         let url_str = url.to_string();
 
         if !self.mark_seen(&url_str).await {
@@ -202,44 +227,171 @@ impl ScraperRuntime {
             return Ok(None);
         }
 
-        self.wait_for_token().await;
+        let mut last_error = String::new();
 
-        let mut attempt = 0u32;
-        loop {
-            match self.client.get(url.clone()).send().await {
-                Ok(resp) => match resp.json::<serde_json::Value>().await {
-                    Ok(json) => return Ok(Some(json)),
-                    Err(e) if attempt < self.retry_config.max_retries => {
-                        attempt += 1;
-                        let delay = self.retry_config.backoff_delay(attempt - 1);
-                        warn!("JSON parse failed (attempt {}), retrying in {}ms: {}", attempt, delay.as_millis(), e);
+        for attempt in 0..=self.retry_config.max_retries {
+            self.wait_for_token().await;
+
+            let request = configure_request(self.client.get(url.clone()));
+            match request.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        match response.json::<serde_json::Value>().await {
+                            Ok(json) => return Ok(Some(json)),
+                            Err(err) => {
+                                last_error = err.to_string();
+                                if attempt < self.retry_config.max_retries
+                                    && is_retryable_reqwest_error(&err)
+                                {
+                                    let delay = self.retry_config.backoff_delay(attempt);
+                                    warn!(
+                                        "JSON parse request error (attempt {}), retrying in {}ms: {}",
+                                        attempt + 1,
+                                        delay.as_millis(),
+                                        last_error
+                                    );
+                                    sleep(delay).await;
+                                    continue;
+                                }
+                                return Err(ScrapeError::MaxRetriesExceeded {
+                                    url: url_str,
+                                    attempts: attempt + 1,
+                                    cause: last_error,
+                                });
+                            }
+                        }
+                    }
+
+                    // Extract retry-after header before consuming response with .text()
+                    let retry_after = response.headers().get(RETRY_AFTER).cloned();
+
+                    let response_body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "<failed to read response body>".to_string());
+                    let body_excerpt = truncate_for_error(&response_body, 256);
+                    last_error = format!("status {}: {}", status.as_u16(), body_excerpt);
+
+                    if attempt < self.retry_config.max_retries && is_retryable_status(status) {
+                        let delay = retry_delay(&self.retry_config, attempt, retry_after.as_ref());
+                        warn!(
+                            "HTTP {} (attempt {}), retrying in {}ms: {}",
+                            status.as_u16(),
+                            attempt + 1,
+                            delay.as_millis(),
+                            url,
+                        );
                         sleep(delay).await;
+                        continue;
                     }
-                    Err(e) => {
-                        return Err(ScrapeError::MaxRetriesExceeded {
-                            url: url_str,
-                            cause: e.to_string(),
-                        });
-                    }
-                },
-                Err(e) if attempt < self.retry_config.max_retries => {
-                    attempt += 1;
-                    let delay = self.retry_config.backoff_delay(attempt - 1);
-                    warn!("HTTP error (attempt {}), retrying in {}ms: {}", attempt, delay.as_millis(), e);
-                    sleep(delay).await;
+
+                    return Err(ScrapeError::HttpStatus {
+                        url: url_str,
+                        status: status.as_u16(),
+                        body: body_excerpt,
+                    });
                 }
-                Err(e) => {
+                Err(err) => {
+                    last_error = err.to_string();
+                    if attempt < self.retry_config.max_retries && is_retryable_reqwest_error(&err) {
+                        let delay = self.retry_config.backoff_delay(attempt);
+                        warn!(
+                            "HTTP error (attempt {}), retrying in {}ms: {}",
+                            attempt + 1,
+                            delay.as_millis(),
+                            last_error
+                        );
+                        sleep(delay).await;
+                        continue;
+                    }
+
                     return Err(ScrapeError::MaxRetriesExceeded {
                         url: url_str,
-                        cause: e.to_string(),
+                        attempts: attempt + 1,
+                        cause: last_error,
                     });
                 }
             }
         }
+
+        Err(ScrapeError::MaxRetriesExceeded {
+            url: url_str,
+            attempts: self.retry_config.max_retries + 1,
+            cause: last_error,
+        })
     }
 }
 
-// ── ScrapeSource trait ────────────────────────────────────────────────────────
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status.is_server_error()
+}
+
+fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect() || err.is_request()
+}
+
+fn retry_delay(
+    retry: &RetryConfig,
+    attempt: u32,
+    retry_after_header: Option<&reqwest::header::HeaderValue>,
+) -> Duration {
+    let backoff = retry.backoff_delay(attempt);
+    let retry_after = retry_after_header
+        .and_then(|h| h.to_str().ok())
+        .and_then(parse_retry_after_seconds)
+        .map(Duration::from_secs);
+
+    retry_after.unwrap_or(backoff).min(retry.max_delay)
+}
+
+fn parse_retry_after_seconds(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
+fn truncate_for_error(message: &str, max_chars: usize) -> String {
+    if message.chars().count() <= max_chars {
+        return message.to_string();
+    }
+    let mut out = String::with_capacity(max_chars + 3);
+    for ch in message.chars().take(max_chars) {
+        out.push(ch);
+    }
+    out.push_str("...");
+    out
+}
+
+// ── Scraper traits ───────────────────────────────────────────────────────────
+
+/// Per-source scraper helper trait with built-in runtime-backed
+/// rate limiting and retry-aware fetch helpers.
+pub trait Scraper: Send + Sync {
+    /// Unique source identifier (e.g. `fec`, `congress`).
+    fn source_id(&self) -> &str;
+
+    /// Source-level runtime settings (rate/retry).
+    fn source_config(&self) -> &SourceConfig;
+
+    /// Optional request customization hook (e.g. auth headers).
+    fn prepare_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        request
+    }
+
+    /// Fetch JSON using shared runtime controls.
+    fn fetch_json<'a>(
+        &'a self,
+        runtime: &'a ScraperRuntime,
+        url: &'a Url,
+    ) -> Pin<Box<dyn Future<Output = ScrapeResult<Option<serde_json::Value>>> + Send + 'a>> {
+        Box::pin(async move {
+            runtime
+                .fetch_json_with(url, |request| self.prepare_request(request))
+                .await
+        })
+    }
+}
 
 /// Core trait implemented by every source-specific scraper.
 ///
@@ -262,6 +414,8 @@ pub trait ScrapeSource: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn rate_limiter_grants_burst() {
@@ -290,8 +444,14 @@ mod tests {
         assert_eq!(cfg.backoff_delay(0), Duration::from_millis(100));
         assert_eq!(cfg.backoff_delay(1), Duration::from_millis(200));
         assert_eq!(cfg.backoff_delay(2), Duration::from_millis(400));
-        // capped at max_delay
         assert_eq!(cfg.backoff_delay(20), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn parse_retry_after_header() {
+        assert_eq!(parse_retry_after_seconds("5"), Some(5));
+        assert_eq!(parse_retry_after_seconds(" 12 "), Some(12));
+        assert_eq!(parse_retry_after_seconds("not-a-number"), None);
     }
 
     #[tokio::test]
@@ -299,5 +459,36 @@ mod tests {
         let rt = ScraperRuntime::new_unlimited();
         assert!(rt.mark_seen("https://example.com/api").await);
         assert!(!rt.mark_seen("https://example.com/api").await);
+    }
+
+    #[tokio::test]
+    async fn fetch_json_retries_retryable_status_then_fails() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/always-500"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .insert_header("Retry-After", "0")
+                    .set_body_string("temporary outage"),
+            )
+            .mount(&server)
+            .await;
+
+        let cfg = SourceConfig {
+            requests_per_second: 1000.0,
+            burst_size: 1000.0,
+            max_retries: 2,
+            retry_base_delay_ms: 0,
+            scrape_interval_secs: 0,
+        };
+        let runtime = ScraperRuntime::new(&cfg);
+        let url = Url::parse(&format!("{}/always-500", server.uri())).unwrap();
+
+        let err = runtime.fetch_json(&url).await.unwrap_err();
+        match err {
+            ScrapeError::HttpStatus { status, .. } => assert_eq!(status, 500),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 }

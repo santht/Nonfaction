@@ -3,9 +3,7 @@ use std::sync::Arc;
 use chrono::{NaiveDate, TimeZone, Utc};
 use tantivy::{DateTime as TantivyDateTime, IndexWriter, TantivyDocument, Term};
 
-use nf_core::entities::{
-    Entity, EntityId, EntityMeta,
-};
+use nf_core::entities::{Entity, EntityId, EntityMeta};
 
 use crate::{error::SearchError, index::NfSchema};
 
@@ -37,7 +35,12 @@ impl EntityIndexer {
         commit_interval: usize,
     ) -> Result<Self, SearchError> {
         let writer = index.writer(heap_size)?;
-        Ok(Self { writer, schema, commit_interval, pending: 0 })
+        Ok(Self {
+            writer,
+            schema,
+            commit_interval,
+            pending: 0,
+        })
     }
 
     /// Index a single entity, replacing any existing document with the same `entity_id`.

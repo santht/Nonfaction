@@ -106,9 +106,7 @@ pub async fn verify_fec_filing_with_base(
                     .get("form_type")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
-                is_amended: first
-                    .get("is_amended")
-                    .and_then(|v| v.as_bool()),
+                is_amended: first.get("is_amended").and_then(|v| v.as_bool()),
                 receipt_date: first
                     .get("receipt_date")
                     .and_then(|v| v.as_str())
@@ -161,7 +159,9 @@ mod tests {
 
         let client = make_client().await;
 
-        let result = verify_fec_filing_with_base(&client, "12345", &server.uri()).await.unwrap();
+        let result = verify_fec_filing_with_base(&client, "12345", &server.uri())
+            .await
+            .unwrap();
         assert!(result.found);
         assert_eq!(result.filing_id, "12345");
         let meta = result.metadata.unwrap();

@@ -148,7 +148,9 @@ impl DocumentArchive {
     pub fn get_node(&self, hash: &str) -> Result<MerkleNode, StoreError> {
         let meta_path = self.merkle_meta_path(hash);
         if !meta_path.exists() {
-            return Err(StoreError::NotFound(format!("Merkle node {hash} not found")));
+            return Err(StoreError::NotFound(format!(
+                "Merkle node {hash} not found"
+            )));
         }
         let bytes = fs::read(meta_path)?;
         Ok(serde_json::from_slice(&bytes)?)
@@ -336,6 +338,9 @@ mod tests {
     fn test_get_node_not_found() {
         let (_dir, archive) = tmp_archive();
         let fake = "f".repeat(64);
-        assert!(matches!(archive.get_node(&fake), Err(StoreError::NotFound(_))));
+        assert!(matches!(
+            archive.get_node(&fake),
+            Err(StoreError::NotFound(_))
+        ));
     }
 }

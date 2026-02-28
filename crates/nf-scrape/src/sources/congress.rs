@@ -18,7 +18,7 @@ use nf_core::{
 };
 
 use crate::config::CongressConfig;
-use crate::framework::{ScrapeError, ScrapeResult, ScrapeSource, ScraperRuntime};
+use crate::framework::{ScrapeError, ScrapeResult, ScrapeSource, Scraper, ScraperRuntime};
 
 // ── API response shapes ───────────────────────────────────────────────────────
 
@@ -146,10 +146,7 @@ impl CongressScraper {
 
     // ── Members ───────────────────────────────────────────────────────────────
 
-    pub async fn scrape_members(
-        &self,
-        runtime: &ScraperRuntime,
-    ) -> ScrapeResult<Vec<Entity>> {
+    pub async fn scrape_members(&self, runtime: &ScraperRuntime) -> ScrapeResult<Vec<Entity>> {
         let mut entities = Vec::new();
         let mut offset = 0u32;
 
@@ -165,15 +162,15 @@ impl CongressScraper {
             )
             .map_err(ScrapeError::UrlParse)?;
 
-            let Some(json) = runtime.fetch_json(&url).await? else {
+            let Some(json) = self.fetch_json(runtime, &url).await? else {
                 break;
             };
 
             let raw = serde_json::to_vec(&json).unwrap_or_default();
             let source_ref = congress_source_ref(&url, &raw);
 
-            let page: CongressMemberPage = serde_json::from_value(json)
-                .map_err(ScrapeError::Json)?;
+            let page: CongressMemberPage =
+                serde_json::from_value(json).map_err(ScrapeError::Json)?;
 
             if page.members.is_empty() {
                 break;
@@ -194,10 +191,8 @@ impl CongressScraper {
                         .with_filing_id(bioguide),
                 );
 
-                let mut person = Person::new(
-                    member.name.as_deref().unwrap_or("Unknown Member"),
-                    chain,
-                );
+                let mut person =
+                    Person::new(member.name.as_deref().unwrap_or("Unknown Member"), chain);
                 person.party_affiliation = parse_party(member.party_name.as_deref());
                 person.jurisdiction = member.state.map(|s| nf_core::Jurisdiction::State(s));
                 person.status = PersonStatus::Active;
@@ -214,7 +209,9 @@ impl CongressScraper {
             );
 
             offset += self.config.per_page;
-            if offset as u64 >= total || entities.len() >= (self.config.max_pages * self.config.per_page) as usize {
+            if offset as u64 >= total
+                || entities.len() >= (self.config.max_pages * self.config.per_page) as usize
+            {
                 break;
             }
         }
@@ -224,20 +221,13 @@ impl CongressScraper {
 
     // ── Bills ─────────────────────────────────────────────────────────────────
 
-    pub async fn scrape_bills(
-        &self,
-        runtime: &ScraperRuntime,
-    ) -> ScrapeResult<Vec<Entity>> {
+    pub async fn scrape_bills(&self, runtime: &ScraperRuntime) -> ScrapeResult<Vec<Entity>> {
         let mut entities = Vec::new();
         let mut offset = 0u32;
 
         loop {
             let url = Url::parse_with_params(
-                &format!(
-                    "{}/bill/{}/",
-                    self.base_url(),
-                    self.config.congress_number
-                ),
+                &format!("{}/bill/{}/", self.base_url(), self.config.congress_number),
                 &[
                     ("api_key", self.api_key()),
                     ("limit", &self.config.per_page.to_string()),
@@ -247,15 +237,14 @@ impl CongressScraper {
             )
             .map_err(ScrapeError::UrlParse)?;
 
-            let Some(json) = runtime.fetch_json(&url).await? else {
+            let Some(json) = self.fetch_json(runtime, &url).await? else {
                 break;
             };
 
             let raw = serde_json::to_vec(&json).unwrap_or_default();
             let source_ref = congress_source_ref(&url, &raw);
 
-            let page: CongressBillPage = serde_json::from_value(json)
-                .map_err(ScrapeError::Json)?;
+            let page: CongressBillPage = serde_json::from_value(json).map_err(ScrapeError::Json)?;
 
             if page.bills.is_empty() {
                 break;
@@ -273,18 +262,15 @@ impl CongressScraper {
                 let congress_num = bill.congress.unwrap_or(self.config.congress_number);
                 let reference = format!("{bill_type}{bill_number} ({congress_num}th Congress)");
 
-                let date = parse_date(
-                    bill.introduced_date
-                        .as_deref()
-                        .or_else(|| bill.latest_action.as_ref().and_then(|a| a.action_date.as_deref())),
-                )
+                let date = parse_date(bill.introduced_date.as_deref().or_else(|| {
+                    bill.latest_action
+                        .as_ref()
+                        .and_then(|a| a.action_date.as_deref())
+                }))
                 .unwrap_or_else(|| NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
 
                 // Use first sponsor as the official; fall back to a placeholder.
-                let sponsor = bill
-                    .sponsors
-                    .as_ref()
-                    .and_then(|s| s.first());
+                let sponsor = bill.sponsors.as_ref().and_then(|s| s.first());
 
                 let official_id = EntityId::new();
 
@@ -342,7 +328,9 @@ impl CongressScraper {
             }
 
             offset += self.config.per_page;
-            if offset as u64 >= total || entities.len() >= (self.config.max_pages * self.config.per_page) as usize {
+            if offset as u64 >= total
+                || entities.len() >= (self.config.max_pages * self.config.per_page) as usize
+            {
                 break;
             }
         }
@@ -351,9 +339,19 @@ impl CongressScraper {
     }
 }
 
-impl ScrapeSource for CongressScraper {
+impl Scraper for CongressScraper {
     fn source_id(&self) -> &str {
         "congress"
+    }
+
+    fn source_config(&self) -> &crate::config::SourceConfig {
+        &self.config.source
+    }
+}
+
+impl ScrapeSource for CongressScraper {
+    fn source_id(&self) -> &str {
+        <Self as Scraper>::source_id(self)
     }
 
     fn scrape_all<'a>(
@@ -429,7 +427,10 @@ mod tests {
             assert!(entity.sources().source_count() >= 1);
             // Source URL must point to the congress API.
             let url = entity.sources().primary.source_url.to_string();
-            assert!(url.contains("/member/"), "URL should point to member endpoint: {url}");
+            assert!(
+                url.contains("/member/"),
+                "URL should point to member endpoint: {url}"
+            );
         }
 
         if let Entity::Person(p) = &entities[0] {

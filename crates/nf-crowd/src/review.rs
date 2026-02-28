@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::submission::{ContributorId, SubmissionId, SubmissionStatus, RejectionReason};
+use crate::submission::{ContributorId, RejectionReason, SubmissionId, SubmissionStatus};
 
 /// Every moderation decision is logged publicly — full audit trail
 #[derive(Debug, Clone, Serialize, Deserialize)]

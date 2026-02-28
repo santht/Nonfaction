@@ -8,6 +8,8 @@ pub struct ScraperConfig {
     pub fec: FecConfig,
     pub congress: CongressConfig,
     pub recap: RecapConfig,
+    pub opensecrets_fec_bulk: OpenSecretsFecBulkConfig,
+    pub pacer: PacerConfig,
 }
 
 impl Default for ScraperConfig {
@@ -16,6 +18,8 @@ impl Default for ScraperConfig {
             fec: FecConfig::default(),
             congress: CongressConfig::default(),
             recap: RecapConfig::default(),
+            opensecrets_fec_bulk: OpenSecretsFecBulkConfig::default(),
+            pacer: PacerConfig::default(),
         }
     }
 }
@@ -152,6 +156,75 @@ impl Default for RecapConfig {
     }
 }
 
+// ── OpenSecrets/FEC bulk ────────────────────────────────────────────────────
+
+/// Configuration for OpenSecrets/FEC-style bulk campaign finance ingestion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenSecretsFecBulkConfig {
+    /// Optional API token for OpenSecrets bulk endpoints.
+    pub api_token: Option<String>,
+    /// Base URL for bulk endpoint API.
+    pub base_url: String,
+    /// Per-source rate-limit / retry settings.
+    pub source: SourceConfig,
+    /// Maximum pages to ingest per run.
+    pub max_pages: u32,
+    /// Rows per page.
+    pub per_page: u32,
+    /// Election cycle to filter bulk rows.
+    pub election_cycle: String,
+}
+
+impl Default for OpenSecretsFecBulkConfig {
+    fn default() -> Self {
+        Self {
+            api_token: None,
+            base_url: "https://www.opensecrets.org/api/v1".to_string(),
+            source: SourceConfig {
+                requests_per_second: 1.0,
+                burst_size: 2.0,
+                ..Default::default()
+            },
+            max_pages: 50,
+            per_page: 500,
+            election_cycle: "2024".to_string(),
+        }
+    }
+}
+
+// ── PACER ────────────────────────────────────────────────────────────────────
+
+/// Configuration for PACER-compatible case APIs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PacerConfig {
+    /// PACER API token, if using an authenticated gateway.
+    pub api_token: Option<String>,
+    /// Base URL for PACER case API.
+    pub base_url: String,
+    /// Per-source rate-limit / retry settings.
+    pub source: SourceConfig,
+    /// Maximum pages to scrape.
+    pub max_pages: u32,
+    /// Results per page.
+    pub per_page: u32,
+}
+
+impl Default for PacerConfig {
+    fn default() -> Self {
+        Self {
+            api_token: None,
+            base_url: "https://api.pacer.uscourts.gov/v1".to_string(),
+            source: SourceConfig {
+                requests_per_second: 1.0,
+                burst_size: 2.0,
+                ..Default::default()
+            },
+            max_pages: 50,
+            per_page: 100,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +235,8 @@ mod tests {
         assert!(!cfg.fec.base_url.is_empty());
         assert!(!cfg.congress.base_url.is_empty());
         assert!(!cfg.recap.base_url.is_empty());
+        assert!(!cfg.opensecrets_fec_bulk.base_url.is_empty());
+        assert!(!cfg.pacer.base_url.is_empty());
         assert!(cfg.fec.source.requests_per_second > 0.0);
         assert!(cfg.congress.source.burst_size > 0.0);
     }
@@ -177,6 +252,20 @@ mod tests {
     #[test]
     fn recap_config_optional_token() {
         let cfg = RecapConfig::default();
+        assert!(cfg.api_token.is_none());
+    }
+
+    #[test]
+    fn opensecrets_bulk_defaults() {
+        let cfg = OpenSecretsFecBulkConfig::default();
+        assert!(cfg.base_url.contains("opensecrets"));
+        assert_eq!(cfg.election_cycle, "2024");
+    }
+
+    #[test]
+    fn pacer_config_defaults() {
+        let cfg = PacerConfig::default();
+        assert!(cfg.base_url.contains("pacer"));
         assert!(cfg.api_token.is_none());
     }
 }

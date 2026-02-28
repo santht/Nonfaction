@@ -17,11 +17,28 @@ pub struct Page<T> {
     pub items: Vec<T>,
     pub page: u32,
     pub page_size: u32,
+    /// Total number of rows matching the query (for computing total pages).
+    pub total_count: i64,
 }
 
 impl<T> Page<T> {
     pub fn new(items: Vec<T>, page: u32, page_size: u32) -> Self {
-        Self { items, page, page_size }
+        let total_count = items.len() as i64;
+        Self {
+            items,
+            page,
+            page_size,
+            total_count,
+        }
+    }
+
+    pub fn with_total(items: Vec<T>, page: u32, page_size: u32, total_count: i64) -> Self {
+        Self {
+            items,
+            page,
+            page_size,
+            total_count,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -30,6 +47,14 @@ impl<T> Page<T> {
 
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    /// Total number of pages.
+    pub fn total_pages(&self) -> u32 {
+        if self.page_size == 0 {
+            return 0;
+        }
+        ((self.total_count as u32) + self.page_size - 1) / self.page_size
     }
 }
 
@@ -81,50 +106,50 @@ fn entity_uuid(entity: &Entity) -> Uuid {
 /// Extract the version counter from any Entity variant.
 fn entity_version(entity: &Entity) -> i64 {
     let v = match entity {
-        Entity::Person(e)             => e.meta.version,
-        Entity::Organization(e)       => e.meta.version,
-        Entity::Document(e)           => e.meta.version,
-        Entity::Payment(e)            => e.meta.version,
-        Entity::CourtCase(e)          => e.meta.version,
-        Entity::Pardon(e)             => e.meta.version,
-        Entity::FlightLogEntry(e)     => e.meta.version,
-        Entity::TimingCorrelation(e)  => e.meta.version,
-        Entity::ConductComparison(e)  => e.meta.version,
-        Entity::PublicStatement(e)    => e.meta.version,
-        Entity::PolicyDecision(e)     => e.meta.version,
+        Entity::Person(e) => e.meta.version,
+        Entity::Organization(e) => e.meta.version,
+        Entity::Document(e) => e.meta.version,
+        Entity::Payment(e) => e.meta.version,
+        Entity::CourtCase(e) => e.meta.version,
+        Entity::Pardon(e) => e.meta.version,
+        Entity::FlightLogEntry(e) => e.meta.version,
+        Entity::TimingCorrelation(e) => e.meta.version,
+        Entity::ConductComparison(e) => e.meta.version,
+        Entity::PublicStatement(e) => e.meta.version,
+        Entity::PolicyDecision(e) => e.meta.version,
     };
     v as i64
 }
 
 fn entity_created_at(entity: &Entity) -> chrono::DateTime<chrono::Utc> {
     match entity {
-        Entity::Person(e)             => e.meta.created_at,
-        Entity::Organization(e)       => e.meta.created_at,
-        Entity::Document(e)           => e.meta.created_at,
-        Entity::Payment(e)            => e.meta.created_at,
-        Entity::CourtCase(e)          => e.meta.created_at,
-        Entity::Pardon(e)             => e.meta.created_at,
-        Entity::FlightLogEntry(e)     => e.meta.created_at,
-        Entity::TimingCorrelation(e)  => e.meta.created_at,
-        Entity::ConductComparison(e)  => e.meta.created_at,
-        Entity::PublicStatement(e)    => e.meta.created_at,
-        Entity::PolicyDecision(e)     => e.meta.created_at,
+        Entity::Person(e) => e.meta.created_at,
+        Entity::Organization(e) => e.meta.created_at,
+        Entity::Document(e) => e.meta.created_at,
+        Entity::Payment(e) => e.meta.created_at,
+        Entity::CourtCase(e) => e.meta.created_at,
+        Entity::Pardon(e) => e.meta.created_at,
+        Entity::FlightLogEntry(e) => e.meta.created_at,
+        Entity::TimingCorrelation(e) => e.meta.created_at,
+        Entity::ConductComparison(e) => e.meta.created_at,
+        Entity::PublicStatement(e) => e.meta.created_at,
+        Entity::PolicyDecision(e) => e.meta.created_at,
     }
 }
 
 fn entity_updated_at(entity: &Entity) -> chrono::DateTime<chrono::Utc> {
     match entity {
-        Entity::Person(e)             => e.meta.updated_at,
-        Entity::Organization(e)       => e.meta.updated_at,
-        Entity::Document(e)           => e.meta.updated_at,
-        Entity::Payment(e)            => e.meta.updated_at,
-        Entity::CourtCase(e)          => e.meta.updated_at,
-        Entity::Pardon(e)             => e.meta.updated_at,
-        Entity::FlightLogEntry(e)     => e.meta.updated_at,
-        Entity::TimingCorrelation(e)  => e.meta.updated_at,
-        Entity::ConductComparison(e)  => e.meta.updated_at,
-        Entity::PublicStatement(e)    => e.meta.updated_at,
-        Entity::PolicyDecision(e)     => e.meta.updated_at,
+        Entity::Person(e) => e.meta.updated_at,
+        Entity::Organization(e) => e.meta.updated_at,
+        Entity::Document(e) => e.meta.updated_at,
+        Entity::Payment(e) => e.meta.updated_at,
+        Entity::CourtCase(e) => e.meta.updated_at,
+        Entity::Pardon(e) => e.meta.updated_at,
+        Entity::FlightLogEntry(e) => e.meta.updated_at,
+        Entity::TimingCorrelation(e) => e.meta.updated_at,
+        Entity::ConductComparison(e) => e.meta.updated_at,
+        Entity::PublicStatement(e) => e.meta.updated_at,
+        Entity::PolicyDecision(e) => e.meta.updated_at,
     }
 }
 
@@ -143,6 +168,11 @@ impl EntityRepository {
         Self { pool }
     }
 
+    /// Access the underlying database pool (e.g. for audit queries).
+    pub fn pool(&self) -> DbPool {
+        self.pool.clone()
+    }
+
     /// List entities filtered by a specific entity type name.
     pub async fn list_by_type(
         &self,
@@ -152,6 +182,12 @@ impl EntityRepository {
     ) -> Result<Page<Entity>, StoreError> {
         let limit = page_size as i64;
         let offset = (page as i64) * limit;
+
+        let (total_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM entities WHERE entity_type = $1")
+                .bind(entity_type)
+                .fetch_one(&self.pool)
+                .await?;
 
         let rows = sqlx::query(
             "SELECT data FROM entities WHERE entity_type = $1 \
@@ -164,52 +200,98 @@ impl EntityRepository {
         .await?;
 
         let items = deserialize_entity_rows(rows)?;
-        Ok(Page::new(items, page, page_size))
+        Ok(Page::with_total(items, page, page_size, total_count))
     }
 
     // ── Convenience typed getters ────────────────────────────────────────────
 
-    pub async fn list_persons(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
+    pub async fn list_persons(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
         self.list_by_type("Person", page, page_size).await
     }
 
-    pub async fn list_organizations(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
+    pub async fn list_organizations(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
         self.list_by_type("Organization", page, page_size).await
     }
 
-    pub async fn list_payments(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
+    pub async fn list_payments(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
         self.list_by_type("Payment", page, page_size).await
     }
 
-    pub async fn list_court_cases(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
+    pub async fn list_court_cases(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
         self.list_by_type("CourtCase", page, page_size).await
     }
 
-    pub async fn list_pardons(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
+    pub async fn list_pardons(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
         self.list_by_type("Pardon", page, page_size).await
     }
 
-    pub async fn list_flight_log_entries(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
+    pub async fn list_flight_log_entries(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
         self.list_by_type("FlightLogEntry", page, page_size).await
     }
 
-    pub async fn list_timing_correlations(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
-        self.list_by_type("TimingCorrelation", page, page_size).await
+    pub async fn list_timing_correlations(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
+        self.list_by_type("TimingCorrelation", page, page_size)
+            .await
     }
 
-    pub async fn list_conduct_comparisons(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
-        self.list_by_type("ConductComparison", page, page_size).await
+    pub async fn list_conduct_comparisons(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
+        self.list_by_type("ConductComparison", page, page_size)
+            .await
     }
 
-    pub async fn list_public_statements(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
+    pub async fn list_public_statements(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
         self.list_by_type("PublicStatement", page, page_size).await
     }
 
-    pub async fn list_policy_decisions(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
+    pub async fn list_policy_decisions(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
         self.list_by_type("PolicyDecision", page, page_size).await
     }
 
-    pub async fn list_documents(&self, page: u32, page_size: u32) -> Result<Page<Entity>, StoreError> {
+    pub async fn list_documents(
+        &self,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
         self.list_by_type("Document", page, page_size).await
     }
 }
@@ -287,16 +369,19 @@ impl Repository<Entity> for EntityRepository {
         let limit = page_size as i64;
         let offset = (page as i64) * limit;
 
-        let rows = sqlx::query(
-            "SELECT data FROM entities ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
+        let (total_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM entities")
+            .fetch_one(&self.pool)
+            .await?;
+
+        let rows =
+            sqlx::query("SELECT data FROM entities ORDER BY created_at DESC LIMIT $1 OFFSET $2")
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?;
 
         let items = deserialize_entity_rows(rows)?;
-        Ok(Page::new(items, page, page_size))
+        Ok(Page::with_total(items, page, page_size, total_count))
     }
 }
 
@@ -322,6 +407,12 @@ impl RelationshipRepository {
         let limit = page_size as i64;
         let offset = (page as i64) * limit;
 
+        let (total_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM relationships WHERE from_entity = $1")
+                .bind(from_entity)
+                .fetch_one(&self.pool)
+                .await?;
+
         let rows = sqlx::query(
             "SELECT data FROM relationships WHERE from_entity = $1 \
              ORDER BY created_at DESC LIMIT $2 OFFSET $3",
@@ -333,7 +424,7 @@ impl RelationshipRepository {
         .await?;
 
         let items = deserialize_relationship_rows(rows)?;
-        Ok(Page::new(items, page, page_size))
+        Ok(Page::with_total(items, page, page_size, total_count))
     }
 
     /// Find all relationships pointing to a given entity.
@@ -346,6 +437,12 @@ impl RelationshipRepository {
         let limit = page_size as i64;
         let offset = (page as i64) * limit;
 
+        let (total_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM relationships WHERE to_entity = $1")
+                .bind(to_entity)
+                .fetch_one(&self.pool)
+                .await?;
+
         let rows = sqlx::query(
             "SELECT data FROM relationships WHERE to_entity = $1 \
              ORDER BY created_at DESC LIMIT $2 OFFSET $3",
@@ -357,7 +454,7 @@ impl RelationshipRepository {
         .await?;
 
         let items = deserialize_relationship_rows(rows)?;
-        Ok(Page::new(items, page, page_size))
+        Ok(Page::with_total(items, page, page_size, total_count))
     }
 }
 
@@ -426,6 +523,10 @@ impl Repository<Relationship> for RelationshipRepository {
         let limit = page_size as i64;
         let offset = (page as i64) * limit;
 
+        let (total_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM relationships")
+            .fetch_one(&self.pool)
+            .await?;
+
         let rows = sqlx::query(
             "SELECT data FROM relationships ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         )
@@ -435,7 +536,7 @@ impl Repository<Relationship> for RelationshipRepository {
         .await?;
 
         let items = deserialize_relationship_rows(rows)?;
-        Ok(Page::new(items, page, page_size))
+        Ok(Page::with_total(items, page, page_size, total_count))
     }
 }
 
@@ -657,8 +758,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_entity_types_store() {
-        use nf_core::entities::*;
         use chrono::NaiveDate;
+        use nf_core::entities::*;
 
         let Some(pool) = db_pool().await else { return };
         let repo = EntityRepository::new(pool.clone());

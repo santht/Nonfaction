@@ -1,12 +1,12 @@
 use axum::{
     body::Bytes,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use std::io::Write;
 use uuid::Uuid;
-use zip::{write::FileOptions, ZipWriter};
+use zip::{ZipWriter, write::FileOptions};
 
 use nf_core::entities::Entity;
 use nf_store::repository::Repository;
@@ -90,7 +90,11 @@ pub async fn export_story_package(
 
     // Neighbor nodes + edges.
     for rel in outgoing.iter().chain(incoming.iter()) {
-        let neighbor_id = if rel.from.0 == id { rel.to.0 } else { rel.from.0 };
+        let neighbor_id = if rel.from.0 == id {
+            rel.to.0
+        } else {
+            rel.from.0
+        };
 
         cyto_edges.push(serde_json::json!({
             "data": {
@@ -104,7 +108,9 @@ pub async fn export_story_package(
         // Fetch neighbor entity for label.
         if let Ok(Some(neighbor)) = state.entity_repo.get(neighbor_id).await {
             // Avoid duplicates.
-            let already = cyto_nodes.iter().any(|n| n["data"]["id"] == neighbor_id.to_string());
+            let already = cyto_nodes
+                .iter()
+                .any(|n| n["data"]["id"] == neighbor_id.to_string());
             if !already {
                 cyto_nodes.push(serde_json::json!({
                     "data": {
@@ -120,21 +126,18 @@ pub async fn export_story_package(
     let graph_json = serde_json::json!({ "nodes": cyto_nodes, "edges": cyto_edges });
 
     // 5. Serialize everything to JSON bytes.
-    let entity_json = serde_json::to_vec_pretty(&entity)
-        .map_err(ApiError::Serialization)?;
+    let entity_json = serde_json::to_vec_pretty(&entity).map_err(ApiError::Serialization)?;
 
-    let sources_json = serde_json::to_vec_pretty(entity.sources())
-        .map_err(ApiError::Serialization)?;
+    let sources_json =
+        serde_json::to_vec_pretty(entity.sources()).map_err(ApiError::Serialization)?;
 
     let all_rels: Vec<_> = outgoing.iter().chain(incoming.iter()).collect();
-    let relationships_json = serde_json::to_vec_pretty(&all_rels)
-        .map_err(ApiError::Serialization)?;
+    let relationships_json =
+        serde_json::to_vec_pretty(&all_rels).map_err(ApiError::Serialization)?;
 
-    let timeline_json = serde_json::to_vec_pretty(&timeline)
-        .map_err(ApiError::Serialization)?;
+    let timeline_json = serde_json::to_vec_pretty(&timeline).map_err(ApiError::Serialization)?;
 
-    let graph_bytes = serde_json::to_vec_pretty(&graph_json)
-        .map_err(ApiError::Serialization)?;
+    let graph_bytes = serde_json::to_vec_pretty(&graph_json).map_err(ApiError::Serialization)?;
 
     let readme = build_readme(&entity, id, outgoing.len() + incoming.len());
 
@@ -177,8 +180,7 @@ fn build_zip(
 ) -> Result<Vec<u8>, std::io::Error> {
     let buf = Vec::new();
     let mut zip = ZipWriter::new(std::io::Cursor::new(buf));
-    let options = FileOptions::<()>::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let options = FileOptions::<()>::default().compression_method(zip::CompressionMethod::Deflated);
 
     zip.start_file("entity.json", options)?;
     zip.write_all(entity_json)?;

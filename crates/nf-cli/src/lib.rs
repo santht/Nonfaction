@@ -1,1 +1,3 @@
-// nf-cli: Admin CLI tools
+// nf-cli: Admin CLI tools and server binary for Nonfaction.
+
+pub mod config;

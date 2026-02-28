@@ -10,8 +10,7 @@ use crate::error::StoreError;
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 /// The genesis prev_hash used for the very first audit entry.
-pub const GENESIS_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AuditOperation {
@@ -223,11 +222,9 @@ impl AuditLog {
     // ── Private ──────────────────────────────────────────────────────────────
 
     async fn get_last_entry_hash(&self) -> Result<String, StoreError> {
-        let row = sqlx::query(
-            "SELECT entry_hash FROM audit_log ORDER BY seq DESC LIMIT 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = sqlx::query("SELECT entry_hash FROM audit_log ORDER BY seq DESC LIMIT 1")
+            .fetch_optional(&self.pool)
+            .await?;
 
         match row {
             Some(r) => Ok(r.try_get("entry_hash")?),
@@ -245,7 +242,7 @@ fn row_to_entry(row: sqlx::postgres::PgRow) -> Result<AuditEntry, StoreError> {
         other => {
             return Err(StoreError::Integrity(format!(
                 "Unknown audit operation: {other}"
-            )))
+            )));
         }
     };
 
@@ -282,10 +279,22 @@ mod tests {
         let entity_id = Uuid::new_v4();
 
         let h1 = compute_entry_hash(
-            id, &ts, AuditOperation::Insert, "Person", entity_id, "data_hash", GENESIS_HASH,
+            id,
+            &ts,
+            AuditOperation::Insert,
+            "Person",
+            entity_id,
+            "data_hash",
+            GENESIS_HASH,
         );
         let h2 = compute_entry_hash(
-            id, &ts, AuditOperation::Insert, "Person", entity_id, "data_hash", GENESIS_HASH,
+            id,
+            &ts,
+            AuditOperation::Insert,
+            "Person",
+            entity_id,
+            "data_hash",
+            GENESIS_HASH,
         );
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64);
@@ -298,10 +307,22 @@ mod tests {
         let entity_id = Uuid::new_v4();
 
         let h_insert = compute_entry_hash(
-            id, &ts, AuditOperation::Insert, "Person", entity_id, "dh", GENESIS_HASH,
+            id,
+            &ts,
+            AuditOperation::Insert,
+            "Person",
+            entity_id,
+            "dh",
+            GENESIS_HASH,
         );
         let h_update = compute_entry_hash(
-            id, &ts, AuditOperation::Update, "Person", entity_id, "dh", GENESIS_HASH,
+            id,
+            &ts,
+            AuditOperation::Update,
+            "Person",
+            entity_id,
+            "dh",
+            GENESIS_HASH,
         );
         assert_ne!(h_insert, h_update);
     }
@@ -314,12 +335,16 @@ mod tests {
         let eid = Uuid::new_v4();
 
         let h1 = compute_entry_hash(
-            id1, &ts, AuditOperation::Insert, "Person", eid, "dh1", GENESIS_HASH,
+            id1,
+            &ts,
+            AuditOperation::Insert,
+            "Person",
+            eid,
+            "dh1",
+            GENESIS_HASH,
         );
         // Second entry uses h1 as prev_hash.
-        let h2 = compute_entry_hash(
-            id2, &ts, AuditOperation::Update, "Person", eid, "dh2", &h1,
-        );
+        let h2 = compute_entry_hash(id2, &ts, AuditOperation::Update, "Person", eid, "dh2", &h1);
         assert_ne!(h1, h2);
     }
 
@@ -385,8 +410,14 @@ mod tests {
         let entity_id = Uuid::new_v4();
         let data = serde_json::json!({"test": true});
 
-        let e1 = log.append(AuditOperation::Insert, "Payment", entity_id, &data).await.unwrap();
-        let e2 = log.append(AuditOperation::Update, "Payment", entity_id, &data).await.unwrap();
+        let e1 = log
+            .append(AuditOperation::Insert, "Payment", entity_id, &data)
+            .await
+            .unwrap();
+        let e2 = log
+            .append(AuditOperation::Update, "Payment", entity_id, &data)
+            .await
+            .unwrap();
 
         // e2's prev_hash must equal e1's entry_hash.
         assert_eq!(e2.prev_hash, e1.entry_hash);

@@ -4,5 +4,8 @@ pub mod config;
 pub mod framework;
 pub mod sources;
 
-pub use config::{FecConfig, CongressConfig, RecapConfig, ScraperConfig, SourceConfig};
-pub use framework::{ScrapeError, ScrapeResult, ScraperRuntime, ScrapeSource};
+pub use config::{
+    CongressConfig, FecConfig, OpenSecretsFecBulkConfig, PacerConfig, RecapConfig, ScraperConfig,
+    SourceConfig,
+};
+pub use framework::{ScrapeError, ScrapeResult, ScrapeSource, Scraper, ScraperRuntime};

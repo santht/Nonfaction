@@ -1,6 +1,7 @@
 use axum::{
-    extract::{Path, Query, State},
     Json,
+    extract::{Path, Query, State},
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -10,7 +11,7 @@ use nf_core::relationships::Relationship;
 use nf_store::repository::Repository;
 
 use crate::error::{ApiError, ApiResult};
-use crate::pagination::{Pagination, PaginatedResponse};
+use crate::pagination::{PaginatedResponse, Pagination};
 use crate::state::AppState;
 
 // ─── List entities ────────────────────────────────────────────────────────────
@@ -44,7 +45,10 @@ pub async fn list_entities(
         state.entity_repo.list(page, per_page).await?
     };
 
-    Ok(Json(PaginatedResponse::from_page(result, params.pagination)))
+    Ok(Json(PaginatedResponse::from_page(
+        result,
+        params.pagination,
+    )))
 }
 
 // ─── Get entity by ID ────────────────────────────────────────────────────────
@@ -130,15 +134,26 @@ pub async fn get_entity_timeline(
     let page = pagination.page();
     let per_page = pagination.per_page();
 
-    let outgoing = state.relationship_repo.list_from(id, page, per_page).await?.items;
-    let incoming = state.relationship_repo.list_to(id, page, per_page).await?.items;
+    let outgoing = state
+        .relationship_repo
+        .list_from(id, page, per_page)
+        .await?
+        .items;
+    let incoming = state
+        .relationship_repo
+        .list_to(id, page, per_page)
+        .await?
+        .items;
 
     let mut entries: Vec<TimelineEntry> = outgoing
         .into_iter()
         .chain(incoming)
         .map(|rel| {
             let date = rel.start_date.map(|d| d.to_string());
-            TimelineEntry { relationship: rel, date }
+            TimelineEntry {
+                relationship: rel,
+                date,
+            }
         })
         .collect();
 
@@ -179,7 +194,83 @@ pub async fn get_entity_sources(
     let source_count = sources_chain.source_count();
     let sources = serde_json::to_value(sources_chain)?;
 
-    Ok(Json(SourcesResponse { entity_id: id, source_count, sources }))
+    Ok(Json(SourcesResponse {
+        entity_id: id,
+        source_count,
+        sources,
+    }))
+}
+
+// ─── Create entity ──────────────────────────────────────────────────────────
+
+/// POST /api/v1/entities
+///
+/// Create a new entity from a fully-formed Entity JSON.
+/// Validates that the entity has at least one source reference.
+pub async fn create_entity(
+    State(state): State<AppState>,
+    Json(entity): Json<Entity>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    // Validate: entity must have at least one source
+    if entity.sources().source_count() == 0 {
+        return Err(ApiError::BadRequest(
+            "entity must have at least one source reference".to_string(),
+        ));
+    }
+
+    let id = state.entity_repo.insert(&entity).await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": id,
+            "entity_type": entity.type_name(),
+        })),
+    ))
+}
+
+// ─── Create relationship ────────────────────────────────────────────────────
+
+/// POST /api/v1/entities/:id/relationships
+///
+/// Create a new relationship originating from the given entity.
+pub async fn create_relationship(
+    State(state): State<AppState>,
+    Path(from_id): Path<Uuid>,
+    Json(rel): Json<Relationship>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    // Verify the from entity exists
+    state
+        .entity_repo
+        .get(from_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("entity {from_id}")))?;
+
+    // Verify the from_id matches the relationship's from field
+    if rel.from.0 != from_id {
+        return Err(ApiError::BadRequest(
+            "relationship 'from' field must match the entity ID in the URL".to_string(),
+        ));
+    }
+
+    // Verify the 'to' entity exists
+    state
+        .entity_repo
+        .get(rel.to.0)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("target entity {}", rel.to.0)))?;
+
+    let id = state.relationship_repo.insert(&rel).await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": id,
+            "from": from_id,
+            "to": rel.to.0,
+            "type": format!("{:?}", rel.rel_type),
+        })),
+    ))
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -235,7 +326,10 @@ mod tests {
     }
 
     fn make_rel() -> Relationship {
-        use nf_core::{entities::EntityId, relationships::{Relationship, RelationshipType}};
+        use nf_core::{
+            entities::EntityId,
+            relationships::{Relationship, RelationshipType},
+        };
         Relationship::new(
             EntityId::new(),
             EntityId::new(),

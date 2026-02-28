@@ -2,10 +2,12 @@
 
 pub mod archive;
 pub mod audit;
+pub mod audited_repository;
 pub mod db;
 pub mod error;
 pub mod migration;
 pub mod repository;
 
-pub use error::StoreError;
+pub use audited_repository::{AuditedEntityRepository, AuditedRelationshipRepository};
 pub use db::DbPool;
+pub use error::StoreError;
