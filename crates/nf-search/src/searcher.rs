@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tantivy::{
     DateTime as TantivyDateTime, ReloadPolicy, Score, SnippetGenerator, TantivyDocument, Term,
     collector::{Count, TopDocs},
-    query::{BooleanQuery, Occur, QueryParser, RangeQuery, TermQuery},
+    query::{BooleanQuery, Occur, QueryParser, RangeQuery, RegexQuery, TermQuery},
     schema::{IndexRecordOption, OwnedValue},
 };
 
@@ -248,6 +248,42 @@ impl NfSearcher {
         Ok(facets)
     }
 
+    /// Return top-N entity names matching a prefix, for autocomplete use-cases.
+    ///
+    /// This is backed by a Tantivy regex query on the `name` field.
+    pub fn prefix_search(&self, prefix: &str, limit: usize) -> Result<Vec<String>, SearchError> {
+        if prefix.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let searcher = self.reader.searcher();
+        let normalized_prefix = prefix.to_lowercase();
+        let exact_prefix = Box::new(TermQuery::new(
+            Term::from_field_text(self.schema.name, &normalized_prefix),
+            IndexRecordOption::Basic,
+        ));
+        // Regex on tantivy-fst is implicitly anchored (equivalent to `^...$`)
+        // and rejects zero-width assertions / empty-match operators.
+        // We model `prefix.*` as (`prefix` OR `prefix.+`).
+        let escaped_prefix = regex_escape(&normalized_prefix);
+        let pattern = format!("{escaped_prefix}.+");
+        let regex_prefix = Box::new(RegexQuery::from_pattern(&pattern, self.schema.name)?);
+        let query = BooleanQuery::new(vec![
+            (Occur::Should, exact_prefix),
+            (Occur::Should, regex_prefix),
+        ]);
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
+
+        let mut names = Vec::with_capacity(top_docs.len());
+        for (_score, addr) in top_docs {
+            let doc: TantivyDocument = searcher.doc(addr)?;
+            if let Some(name) = text_field(&doc, self.schema.name) {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
+
     /// Force the reader to reload from the latest committed segments.
     pub fn reload(&self) -> Result<(), SearchError> {
         self.reader.reload()?;
@@ -265,4 +301,19 @@ fn text_field(doc: &TantivyDocument, field: tantivy::schema::Field) -> Option<St
             None
         }
     })
+}
+
+fn regex_escape(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^'
+            | '$' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }

@@ -44,7 +44,7 @@ impl RateLimiter {
     }
 
     fn check_ip_at(&self, ip: IpAddr, now: Instant) -> Result<(), RateLimitRejection> {
-        let mut windows = self.inner.lock().unwrap();
+        let mut windows = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let entry = windows.entry(ip).or_insert(RequestWindow {
             started_at: now,
             count: 0,

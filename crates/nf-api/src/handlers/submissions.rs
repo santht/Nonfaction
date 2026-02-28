@@ -162,7 +162,7 @@ pub async fn create_submission(
     let submission_type = req.submission_type.into_submission_type();
 
     let sub_id = {
-        let mut queue = state.submission_queue.lock().unwrap();
+        let mut queue = state.submission_queue.lock().unwrap_or_else(|e| e.into_inner());
         queue
             .submit(
                 contributor_id,
@@ -180,7 +180,7 @@ pub async fn create_submission(
         "submission created"
     );
 
-    let queue = state.submission_queue.lock().unwrap();
+    let queue = state.submission_queue.lock().unwrap_or_else(|e| e.into_inner());
     let submission = queue
         .get(sub_id)
         .ok_or_else(|| ApiError::Internal("submission created but not found".to_string()))?;
@@ -196,7 +196,7 @@ pub async fn list_submissions(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<ListSubmissionsParams>,
 ) -> ApiResult<Json<Vec<SubmissionResponse>>> {
-    let queue = state.submission_queue.lock().unwrap();
+    let queue = state.submission_queue.lock().unwrap_or_else(|e| e.into_inner());
 
     let submissions: Vec<SubmissionResponse> = if let Some(status) = &params.status {
         match status.as_str() {
@@ -235,7 +235,7 @@ pub async fn get_submission(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<SubmissionResponse>> {
-    let queue = state.submission_queue.lock().unwrap();
+    let queue = state.submission_queue.lock().unwrap_or_else(|e| e.into_inner());
     let submission = queue
         .get(SubmissionId(id))
         .ok_or_else(|| ApiError::NotFound(format!("submission {id}")))?;
@@ -258,7 +258,7 @@ pub async fn review_submission(
     };
 
     {
-        let mut queue = state.submission_queue.lock().unwrap();
+        let mut queue = state.submission_queue.lock().unwrap_or_else(|e| e.into_inner());
         match req.decision {
             ReviewDecisionRequest::Claim => {
                 queue
@@ -285,7 +285,7 @@ pub async fn review_submission(
         "submission review action applied"
     );
 
-    let queue = state.submission_queue.lock().unwrap();
+    let queue = state.submission_queue.lock().unwrap_or_else(|e| e.into_inner());
     let submission = queue
         .get(submission_id)
         .ok_or_else(|| ApiError::NotFound(format!("submission {id}")))?;

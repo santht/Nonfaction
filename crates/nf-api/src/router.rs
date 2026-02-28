@@ -177,7 +177,7 @@ async fn stats(
     let relationships = state.relationship_repo.list(0, 1).await?;
 
     let pending_submissions = {
-        let queue = state.submission_queue.lock().unwrap();
+        let queue = state.submission_queue.lock().unwrap_or_else(|e| e.into_inner());
         queue.pending().len()
     };
 

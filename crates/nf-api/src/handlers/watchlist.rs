@@ -68,22 +68,22 @@ impl WatchlistStore {
     }
 
     pub fn subscribe(&self, sub: Subscription) {
-        let mut map = self.inner.lock().unwrap();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(sub.id, sub);
     }
 
     pub fn list(&self) -> Vec<Subscription> {
-        let map = self.inner.lock().unwrap();
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.values().cloned().collect()
     }
 
     pub fn remove(&self, id: Uuid) -> bool {
-        let mut map = self.inner.lock().unwrap();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.remove(&id).is_some()
     }
 
     pub fn get(&self, id: Uuid) -> Option<Subscription> {
-        let map = self.inner.lock().unwrap();
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.get(&id).cloned()
     }
 }

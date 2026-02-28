@@ -154,11 +154,14 @@ fn entity_updated_at(entity: &Entity) -> chrono::DateTime<chrono::Utc> {
 }
 
 const ENTITY_UPDATE_SQL: &str =
-    "UPDATE entities SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = $2, updated_at = $3 WHERE id = $4";
+    "UPDATE entities SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = $2, updated_at = $3 WHERE id = $4 AND version = $5";
 const ENTITY_DELETE_SQL: &str = "DELETE FROM entities WHERE id = $1";
 const RELATIONSHIP_DELETE_SQL: &str = "DELETE FROM relationships WHERE id = $1";
 const ENTITY_COUNT_SQL: &str = "SELECT COUNT(*) FROM entities";
 const RELATIONSHIP_COUNT_SQL: &str = "SELECT COUNT(*) FROM relationships";
+const ENTITY_SEARCH_BY_JSONB_COUNT_SQL: &str = "SELECT COUNT(*) FROM entities WHERE data @> $1::jsonb";
+const ENTITY_SEARCH_BY_JSONB_LIST_SQL: &str =
+    "SELECT data FROM entities WHERE data @> $1::jsonb ORDER BY created_at DESC LIMIT $2 OFFSET $3";
 
 fn map_sqlx_write_error(err: sqlx::Error) -> StoreError {
     match &err {
@@ -282,6 +285,32 @@ impl EntityRepository {
         .bind(offset)
         .fetch_all(&self.pool)
         .await?;
+
+        let items = deserialize_entity_rows(rows)?;
+        Ok(Page::with_total(items, page, page_size, total_count))
+    }
+
+    /// Search entities by JSONB containment (`data @> query`).
+    pub async fn search_by_jsonb(
+        &self,
+        query: &JsonValue,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Page<Entity>, StoreError> {
+        let limit = page_size as i64;
+        let offset = (page as i64) * limit;
+
+        let (total_count,): (i64,) = sqlx::query_as(ENTITY_SEARCH_BY_JSONB_COUNT_SQL)
+            .bind(query)
+            .fetch_one(&self.pool)
+            .await?;
+
+        let rows = sqlx::query(ENTITY_SEARCH_BY_JSONB_LIST_SQL)
+            .bind(query)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
 
         let items = deserialize_entity_rows(rows)?;
         Ok(Page::with_total(items, page, page_size, total_count))
@@ -425,6 +454,12 @@ impl Repository<Entity> for EntityRepository {
         let id = entity_uuid(entity);
         let data = serde_json::to_value(entity)?;
         let version = entity_version(entity);
+        if version <= 0 {
+            return Err(StoreError::Integrity(
+                "Entity version must be greater than 0".to_string(),
+            ));
+        }
+        let expected_current_version = version - 1;
         let updated_at = entity_updated_at(entity);
 
         let result = sqlx::query(ENTITY_UPDATE_SQL)
@@ -432,11 +467,26 @@ impl Repository<Entity> for EntityRepository {
             .bind(version)
             .bind(updated_at)
             .bind(id)
+            .bind(expected_current_version)
             .execute(&self.pool)
             .await
             .map_err(map_sqlx_write_error)?;
 
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() > 0 {
+            return Ok(true);
+        }
+
+        let current_version = sqlx::query_scalar::<_, i64>("SELECT version FROM entities WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        match current_version {
+            None => Ok(false),
+            Some(actual_version) => Err(StoreError::Integrity(format!(
+                "Stale entity update for {id}: expected current version {expected_current_version}, found {actual_version}"
+            ))),
+        }
     }
 
     async fn delete(&self, id: Uuid) -> Result<bool, StoreError> {
@@ -548,6 +598,25 @@ impl RelationshipRepository {
         let items = deserialize_relationship_rows(rows)?;
         Ok(Page::with_total(items, page, page_size, total_count))
     }
+
+    /// Find all relationships between two entities in either direction.
+    pub async fn list_relationships_between(
+        &self,
+        entity_a: Uuid,
+        entity_b: Uuid,
+    ) -> Result<Vec<Relationship>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT data FROM relationships \
+             WHERE (from_entity = $1 AND to_entity = $2) OR (from_entity = $2 AND to_entity = $1) \
+             ORDER BY created_at DESC",
+        )
+        .bind(entity_a)
+        .bind(entity_b)
+        .fetch_all(&self.pool)
+        .await?;
+
+        deserialize_relationship_rows(rows)
+    }
 }
 
 impl Repository<Relationship> for RelationshipRepository {
@@ -589,17 +658,41 @@ impl Repository<Relationship> for RelationshipRepository {
 
     async fn update(&self, rel: &Relationship) -> Result<bool, StoreError> {
         let data = serde_json::to_value(rel)?;
+        let version = rel.version as i64;
+        if version <= 0 {
+            return Err(StoreError::Integrity(
+                "Relationship version must be greater than 0".to_string(),
+            ));
+        }
+        let expected_current_version = version - 1;
 
         let result = sqlx::query(
-            "UPDATE relationships SET data = $1, version = $2, updated_at = NOW() WHERE id = $3",
+            "UPDATE relationships SET data = $1, version = $2, updated_at = NOW() WHERE id = $3 AND version = $4",
         )
         .bind(data)
-        .bind(rel.version as i64)
+        .bind(version)
         .bind(rel.id.0)
+        .bind(expected_current_version)
         .execute(&self.pool)
         .await?;
 
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() > 0 {
+            return Ok(true);
+        }
+
+        let current_version =
+            sqlx::query_scalar::<_, i64>("SELECT version FROM relationships WHERE id = $1")
+                .bind(rel.id.0)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        match current_version {
+            None => Ok(false),
+            Some(actual_version) => Err(StoreError::Integrity(format!(
+                "Stale relationship update for {}: expected current version {}, found {}",
+                rel.id.0, expected_current_version, actual_version
+            ))),
+        }
     }
 
     async fn delete(&self, id: Uuid) -> Result<bool, StoreError> {
@@ -732,6 +825,7 @@ mod tests {
     #[test]
     fn test_entity_update_sql_uses_jsonb_merge() {
         assert!(ENTITY_UPDATE_SQL.contains("COALESCE(data, '{}'::jsonb) || $1::jsonb"));
+        assert!(ENTITY_UPDATE_SQL.contains("AND version = $5"));
     }
 
     #[test]
@@ -755,6 +849,22 @@ mod tests {
     #[test]
     fn test_relationship_count_sql() {
         assert_eq!(RELATIONSHIP_COUNT_SQL, "SELECT COUNT(*) FROM relationships");
+    }
+
+    #[test]
+    fn test_entity_search_by_jsonb_count_sql() {
+        assert_eq!(
+            ENTITY_SEARCH_BY_JSONB_COUNT_SQL,
+            "SELECT COUNT(*) FROM entities WHERE data @> $1::jsonb"
+        );
+    }
+
+    #[test]
+    fn test_entity_search_by_jsonb_list_sql() {
+        assert_eq!(
+            ENTITY_SEARCH_BY_JSONB_LIST_SQL,
+            "SELECT data FROM entities WHERE data @> $1::jsonb ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+        );
     }
 
     #[test]
@@ -846,6 +956,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_entity_update_stale_version_returns_integrity_error() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let person = Person::new("Stale Version", test_source_chain());
+        let id = person.meta.id.0;
+        repo.insert(&Entity::Person(person)).await.unwrap();
+
+        // Two concurrent snapshots both bump to v2. One should become stale.
+        let fetched = repo.get(id).await.unwrap().unwrap();
+        let mut first = match fetched.clone() {
+            Entity::Person(p) => p,
+            _ => panic!("expected Person"),
+        };
+        first.name = "First Writer".to_string();
+        first.meta.version = 2;
+        assert!(repo.update(&Entity::Person(first)).await.unwrap());
+
+        let mut second = match fetched {
+            Entity::Person(p) => p,
+            _ => panic!("expected Person"),
+        };
+        second.name = "Second Writer".to_string();
+        second.meta.version = 2;
+        let err = repo.update(&Entity::Person(second)).await.unwrap_err();
+        assert!(matches!(err, StoreError::Integrity(_)));
+
+        repo.delete(id).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_entity_update_missing_row_returns_false() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let mut person = Person::new("Missing Row", test_source_chain());
+        person.meta.version = 2;
+        let updated = repo.update(&Entity::Person(person)).await.unwrap();
+        assert!(!updated);
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
     async fn test_entity_list_pagination() {
         let Some(pool) = db_pool().await else { return };
         let repo = EntityRepository::new(pool.clone());
@@ -903,6 +1058,171 @@ mod tests {
         assert!(rel_repo.delete(rel_id).await.unwrap());
         assert!(rel_repo.get(rel_id).await.unwrap().is_none());
 
+        entity_repo.delete(id1).await.unwrap();
+        entity_repo.delete(id2).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_entity_search_by_jsonb_finds_matching_records() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let p1 = Person::new("Search Alpha", test_source_chain());
+        let p2 = Person::new("Search Beta", test_source_chain());
+        let id1 = p1.meta.id.0;
+        let id2 = p2.meta.id.0;
+        repo.insert(&Entity::Person(p1)).await.unwrap();
+        repo.insert(&Entity::Person(p2)).await.unwrap();
+
+        let page = repo
+            .search_by_jsonb(&serde_json::json!({"name": "Search Alpha"}), 0, 10)
+            .await
+            .unwrap();
+        assert!(page.items.iter().any(|e| entity_uuid(e) == id1));
+        assert!(!page.items.iter().any(|e| entity_uuid(e) == id2));
+        assert!(page.total_count >= 1);
+
+        repo.delete(id1).await.unwrap();
+        repo.delete(id2).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_entity_search_by_jsonb_paginates_results() {
+        let Some(pool) = db_pool().await else { return };
+        let repo = EntityRepository::new(pool.clone());
+
+        let mut inserted_ids = Vec::new();
+        for i in 0..3 {
+            let p = Person::new(format!("Paged Search {i}"), test_source_chain());
+            inserted_ids.push(p.meta.id.0);
+            repo.insert(&Entity::Person(p)).await.unwrap();
+        }
+
+        let query = serde_json::json!({"type_name": "Person"});
+        let first = repo.search_by_jsonb(&query, 0, 2).await.unwrap();
+        let second = repo.search_by_jsonb(&query, 1, 2).await.unwrap();
+        assert_eq!(first.page_size, 2);
+        assert!(first.total_count >= 3);
+        assert!(first.items.len() <= 2);
+        assert!(second.items.len() <= 2);
+
+        for id in inserted_ids {
+            repo.delete(id).await.unwrap();
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_relationship_list_between_bidirectional() {
+        let Some(pool) = db_pool().await else { return };
+        let entity_repo = EntityRepository::new(pool.clone());
+        let rel_repo = RelationshipRepository::new(pool.clone());
+
+        let p1 = Person::new("Between A", test_source_chain());
+        let p2 = Person::new("Between B", test_source_chain());
+        let p3 = Person::new("Between C", test_source_chain());
+        let id1 = p1.meta.id.0;
+        let id2 = p2.meta.id.0;
+        let id3 = p3.meta.id.0;
+        entity_repo.insert(&Entity::Person(p1)).await.unwrap();
+        entity_repo.insert(&Entity::Person(p2)).await.unwrap();
+        entity_repo.insert(&Entity::Person(p3)).await.unwrap();
+
+        let rel_ab = Relationship::new(
+            EntityId(id1),
+            EntityId(id2),
+            RelationshipType::DonatedTo,
+            test_source_chain(),
+        );
+        let rel_ba = Relationship::new(
+            EntityId(id2),
+            EntityId(id1),
+            RelationshipType::BusinessWith,
+            test_source_chain(),
+        );
+        let rel_ac = Relationship::new(
+            EntityId(id1),
+            EntityId(id3),
+            RelationshipType::BusinessWith,
+            test_source_chain(),
+        );
+        let id_ab = rel_ab.id.0;
+        let id_ba = rel_ba.id.0;
+        let id_ac = rel_ac.id.0;
+        rel_repo.insert(&rel_ab).await.unwrap();
+        rel_repo.insert(&rel_ba).await.unwrap();
+        rel_repo.insert(&rel_ac).await.unwrap();
+
+        let between = rel_repo.list_relationships_between(id1, id2).await.unwrap();
+        let between_ids: Vec<Uuid> = between.into_iter().map(|r| r.id.0).collect();
+        assert!(between_ids.contains(&id_ab));
+        assert!(between_ids.contains(&id_ba));
+        assert!(!between_ids.contains(&id_ac));
+
+        rel_repo.delete(id_ab).await.unwrap();
+        rel_repo.delete(id_ba).await.unwrap();
+        rel_repo.delete(id_ac).await.unwrap();
+        entity_repo.delete(id1).await.unwrap();
+        entity_repo.delete(id2).await.unwrap();
+        entity_repo.delete(id3).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_relationship_list_between_empty_when_none_exist() {
+        let Some(pool) = db_pool().await else { return };
+        let entity_repo = EntityRepository::new(pool.clone());
+        let rel_repo = RelationshipRepository::new(pool.clone());
+
+        let p1 = Person::new("None A", test_source_chain());
+        let p2 = Person::new("None B", test_source_chain());
+        let id1 = p1.meta.id.0;
+        let id2 = p2.meta.id.0;
+        entity_repo.insert(&Entity::Person(p1)).await.unwrap();
+        entity_repo.insert(&Entity::Person(p2)).await.unwrap();
+
+        let between = rel_repo.list_relationships_between(id1, id2).await.unwrap();
+        assert!(between.is_empty());
+
+        entity_repo.delete(id1).await.unwrap();
+        entity_repo.delete(id2).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_relationship_update_stale_version_returns_integrity_error() {
+        let Some(pool) = db_pool().await else { return };
+        let entity_repo = EntityRepository::new(pool.clone());
+        let rel_repo = RelationshipRepository::new(pool.clone());
+
+        let p1 = Person::new("Rel Stale A", test_source_chain());
+        let p2 = Person::new("Rel Stale B", test_source_chain());
+        let id1 = p1.meta.id.0;
+        let id2 = p2.meta.id.0;
+        entity_repo.insert(&Entity::Person(p1)).await.unwrap();
+        entity_repo.insert(&Entity::Person(p2)).await.unwrap();
+
+        let rel = Relationship::new(
+            EntityId(id1),
+            EntityId(id2),
+            RelationshipType::DonatedTo,
+            test_source_chain(),
+        );
+        let rel_id = rel.id.0;
+        rel_repo.insert(&rel).await.unwrap();
+
+        let mut first = rel_repo.get(rel_id).await.unwrap().unwrap();
+        first.version = 2;
+        assert!(rel_repo.update(&first).await.unwrap());
+
+        let mut second = rel_repo.get(rel_id).await.unwrap().unwrap();
+        second.version = 2;
+        let err = rel_repo.update(&second).await.unwrap_err();
+        assert!(matches!(err, StoreError::Integrity(_)));
+
+        rel_repo.delete(rel_id).await.unwrap();
         entity_repo.delete(id1).await.unwrap();
         entity_repo.delete(id2).await.unwrap();
         pool.close().await;

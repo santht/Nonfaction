@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Duration, NaiveDate};
 use nf_core::entities::{CorrelationType, EntityId, EntityMeta, TimingCorrelation};
 use nf_core::source::{ContentHash, SourceChain, SourceRef, SourceType};
+use serde_json::{Value, json};
 use url::Url;
 
 /// The type of event recorded in the timing engine.
@@ -51,6 +52,19 @@ pub struct MoneyFlowChain {
     pub total_amount: f64,
     pub start_date: NaiveDate,
     pub end_date: NaiveDate,
+}
+
+/// A suspicious cluster of many small donations near a vote date.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuspiciousBurstPattern {
+    pub vote_date: NaiveDate,
+    pub window_start: NaiveDate,
+    pub window_end: NaiveDate,
+    pub flow_count: usize,
+    pub total_amount: f64,
+    pub average_amount: f64,
+    pub unique_donors: usize,
+    pub unique_recipients: usize,
 }
 
 /// Timing engine that stores events and auto-generates timing correlations.
@@ -130,6 +144,11 @@ impl TimingEngine {
     /// All stored events.
     pub fn events(&self) -> &[TimingEvent] {
         &self.events
+    }
+
+    /// Export timing correlations into a stable JSON envelope.
+    pub fn export_correlations_json(&self, correlations: &[TimingCorrelation]) -> Value {
+        json!({ "correlations": correlations })
     }
 }
 
@@ -256,6 +275,66 @@ impl TemporalNetworkAnalyzer {
         }
 
         results
+    }
+
+    /// Detect suspicious donation bursts in the `lookback_days` window before
+    /// each vote date. A burst is flagged when at least `min_flow_count` flows
+    /// at or below `small_amount_threshold` exist in that window.
+    pub fn detect_suspicious_bursts(
+        &self,
+        vote_dates: &[NaiveDate],
+        lookback_days: i64,
+        small_amount_threshold: f64,
+        min_flow_count: usize,
+    ) -> Vec<SuspiciousBurstPattern> {
+        if vote_dates.is_empty()
+            || lookback_days <= 0
+            || small_amount_threshold <= 0.0
+            || min_flow_count == 0
+        {
+            return Vec::new();
+        }
+
+        let mut bursts = Vec::new();
+
+        for vote_date in vote_dates {
+            let window_start = *vote_date - Duration::days(lookback_days);
+            let window_end = *vote_date - Duration::days(1);
+
+            let matching: Vec<&MoneyFlow> = self
+                .flows
+                .iter()
+                .filter(|flow| {
+                    flow.date >= window_start
+                        && flow.date <= window_end
+                        && flow.amount > 0.0
+                        && flow.amount <= small_amount_threshold
+                })
+                .collect();
+
+            if matching.len() < min_flow_count {
+                continue;
+            }
+
+            let total_amount: f64 = matching.iter().map(|flow| flow.amount).sum();
+            let unique_donors: HashSet<EntityId> = matching.iter().map(|flow| flow.donor).collect();
+            let unique_recipients: HashSet<EntityId> =
+                matching.iter().map(|flow| flow.recipient).collect();
+
+            bursts.push(SuspiciousBurstPattern {
+                vote_date: *vote_date,
+                window_start,
+                window_end,
+                flow_count: matching.len(),
+                total_amount,
+                average_amount: total_amount / matching.len() as f64,
+                unique_donors: unique_donors.len(),
+                unique_recipients: unique_recipients.len(),
+            });
+        }
+
+        bursts.sort_by_key(|burst| burst.vote_date);
+        bursts
     }
 }
 
@@ -659,5 +738,68 @@ mod tests {
                 .iter()
                 .any(|c| c.correlation_type == CorrelationType::LobbyingToVote)
         );
+    }
+
+    #[test]
+    fn test_export_correlations_json_contains_rows() {
+        let mut engine = TimingEngine::new();
+        let entity = EntityId::new();
+        engine.new_event(
+            entity,
+            EventType::Donation,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        );
+        let corrs = engine.new_event(
+            entity,
+            EventType::Vote,
+            NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        );
+
+        let exported = engine.export_correlations_json(&corrs);
+        assert_eq!(exported["correlations"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            exported["correlations"][0]["correlation_type"].as_str().unwrap(),
+            "DonationToVote"
+        );
+    }
+
+    #[test]
+    fn test_export_correlations_json_empty() {
+        let engine = TimingEngine::new();
+        let exported = engine.export_correlations_json(&[]);
+        assert!(exported["correlations"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_detect_suspicious_bursts_flags_small_donation_cluster() {
+        let mut analyzer = TemporalNetworkAnalyzer::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        let vote = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
+
+        analyzer.add_flow(a, b, 25.0, NaiveDate::from_ymd_opt(2024, 5, 20).unwrap());
+        analyzer.add_flow(c, b, 30.0, NaiveDate::from_ymd_opt(2024, 5, 25).unwrap());
+        analyzer.add_flow(a, c, 20.0, NaiveDate::from_ymd_opt(2024, 5, 30).unwrap());
+        analyzer.add_flow(a, b, 500.0, NaiveDate::from_ymd_opt(2024, 5, 29).unwrap());
+
+        let bursts = analyzer.detect_suspicious_bursts(&[vote], 14, 50.0, 3);
+        assert_eq!(bursts.len(), 1);
+        assert_eq!(bursts[0].flow_count, 3);
+        assert!((bursts[0].total_amount - 75.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_detect_suspicious_bursts_not_flagged_when_below_min_count() {
+        let mut analyzer = TemporalNetworkAnalyzer::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let vote = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
+
+        analyzer.add_flow(a, b, 25.0, NaiveDate::from_ymd_opt(2024, 5, 20).unwrap());
+        analyzer.add_flow(a, b, 20.0, NaiveDate::from_ymd_opt(2024, 5, 22).unwrap());
+
+        let bursts = analyzer.detect_suspicious_bursts(&[vote], 14, 50.0, 3);
+        assert!(bursts.is_empty());
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{NaiveDate, TimeZone, Utc};
-use tantivy::{DateTime as TantivyDateTime, IndexWriter, TantivyDocument, Term};
+use tantivy::{DateTime as TantivyDateTime, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
 use nf_core::entities::{Entity, EntityId, EntityMeta};
 
@@ -87,6 +87,29 @@ impl EntityIndexer {
         let id_term = Term::from_field_text(self.schema.entity_id, &id_str);
         self.writer.delete_term(id_term);
         Ok(())
+    }
+
+    /// Delete multiple entities and commit once.
+    pub fn bulk_delete(&mut self, entity_ids: &[EntityId]) -> Result<(), SearchError> {
+        for entity_id in entity_ids {
+            let id_str = entity_id.0.to_string();
+            let id_term = Term::from_field_text(self.schema.entity_id, &id_str);
+            self.writer.delete_term(id_term);
+        }
+        self.commit()?;
+        Ok(())
+    }
+
+    /// Return the number of committed documents currently visible in the index.
+    pub fn doc_count(&self) -> Result<usize, SearchError> {
+        let reader = self
+            .writer
+            .index()
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()?;
+        reader.reload()?;
+        Ok(reader.searcher().num_docs() as usize)
     }
 
     // ─── Document construction ────────────────────────────────────────────────

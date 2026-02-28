@@ -5,6 +5,7 @@ use nf_core::relationships::RelationshipType;
 use petgraph::Direction;
 use petgraph::algo::connected_components;
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef;
 
 /// Directed graph over EntityIds with typed RelationshipType edges.
 pub struct NfGraph {
@@ -47,6 +48,135 @@ impl NfGraph {
                 .map(|n| *self.graph.node_weight(n).unwrap())
                 .collect(),
             None => Vec::new(),
+        }
+    }
+
+    /// Out-degree (number of outgoing edges) for `id`.
+    pub fn out_degree(&self, id: EntityId) -> usize {
+        match self.node_map.get(&id) {
+            Some(&idx) => self.graph.edges_directed(idx, Direction::Outgoing).count(),
+            None => 0,
+        }
+    }
+
+    /// In-degree (number of incoming edges) for `id`.
+    pub fn in_degree(&self, id: EntityId) -> usize {
+        match self.node_map.get(&id) {
+            Some(&idx) => self.graph.edges_directed(idx, Direction::Incoming).count(),
+            None => 0,
+        }
+    }
+
+    /// Extract the induced directed subgraph reachable from `center_id` within
+    /// `depth` outgoing BFS hops.
+    pub fn subgraph(&self, center_id: EntityId, depth: usize) -> NfGraph {
+        let &center_idx = match self.node_map.get(&center_id) {
+            Some(idx) => idx,
+            None => return NfGraph::new(),
+        };
+
+        let mut included: HashSet<NodeIndex> = HashSet::new();
+        let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
+        included.insert(center_idx);
+        queue.push_back((center_idx, 0));
+
+        while let Some((current, dist)) = queue.pop_front() {
+            if dist >= depth {
+                continue;
+            }
+            for neighbor in self.graph.neighbors(current) {
+                if included.insert(neighbor) {
+                    queue.push_back((neighbor, dist + 1));
+                }
+            }
+        }
+
+        let mut result = NfGraph::new();
+        for idx in &included {
+            let id = *self.graph.node_weight(*idx).unwrap();
+            result.add_node(id);
+        }
+
+        for edge in self.graph.edge_references() {
+            let source = edge.source();
+            let target = edge.target();
+            if included.contains(&source) && included.contains(&target) {
+                let source_id = *self.graph.node_weight(source).unwrap();
+                let target_id = *self.graph.node_weight(target).unwrap();
+                result.add_edge(source_id, target_id, *edge.weight());
+            }
+        }
+
+        result
+    }
+
+    /// Find all simple directed paths from `from` to `to` with at most
+    /// `max_length` edges.
+    pub fn all_paths_up_to_length(
+        &self,
+        from: EntityId,
+        to: EntityId,
+        max_length: usize,
+    ) -> Vec<Vec<EntityId>> {
+        let &from_idx = match self.node_map.get(&from) {
+            Some(idx) => idx,
+            None => return Vec::new(),
+        };
+        let &to_idx = match self.node_map.get(&to) {
+            Some(idx) => idx,
+            None => return Vec::new(),
+        };
+
+        let mut results = Vec::new();
+        let mut path = vec![from_idx];
+        let mut visited = HashSet::new();
+        visited.insert(from_idx);
+
+        self.collect_paths(
+            from_idx,
+            to_idx,
+            max_length,
+            &mut path,
+            &mut visited,
+            &mut results,
+        );
+
+        results
+            .into_iter()
+            .map(|indices| {
+                indices
+                    .into_iter()
+                    .map(|idx| *self.graph.node_weight(idx).unwrap())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn collect_paths(
+        &self,
+        current: NodeIndex,
+        target: NodeIndex,
+        remaining: usize,
+        path: &mut Vec<NodeIndex>,
+        visited: &mut HashSet<NodeIndex>,
+        results: &mut Vec<Vec<NodeIndex>>,
+    ) {
+        if current == target {
+            results.push(path.clone());
+            return;
+        }
+        if remaining == 0 {
+            return;
+        }
+
+        for next in self.graph.neighbors(current) {
+            if !visited.insert(next) {
+                continue;
+            }
+            path.push(next);
+            self.collect_paths(next, target, remaining - 1, path, visited, results);
+            path.pop();
+            visited.remove(&next);
         }
     }
 
@@ -275,6 +405,92 @@ mod tests {
 
         // Node with no outgoing edges returns empty
         assert!(g.neighbors(b).is_empty());
+    }
+
+    #[test]
+    fn test_out_degree_and_in_degree() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(a, c, RelationshipType::DonatedTo);
+        g.add_edge(c, a, RelationshipType::Pardoned);
+
+        assert_eq!(g.out_degree(a), 2);
+        assert_eq!(g.in_degree(a), 1);
+        assert_eq!(g.out_degree(b), 0);
+        assert_eq!(g.in_degree(b), 1);
+    }
+
+    #[test]
+    fn test_degree_methods_unknown_node() {
+        let g = NfGraph::new();
+        let id = EntityId::new();
+        assert_eq!(g.out_degree(id), 0);
+        assert_eq!(g.in_degree(id), 0);
+    }
+
+    #[test]
+    fn test_subgraph_depth_one() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        let d = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(b, c, RelationshipType::DonatedTo);
+        g.add_edge(a, d, RelationshipType::Pardoned);
+
+        let sub = g.subgraph(a, 1);
+        assert_eq!(sub.inner().node_count(), 3);
+        assert_eq!(sub.inner().edge_count(), 2);
+        assert!(!sub.neighbors(a).is_empty());
+        assert!(sub.neighbors(b).is_empty());
+    }
+
+    #[test]
+    fn test_subgraph_unknown_center_returns_empty() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        g.add_node(a);
+        let sub = g.subgraph(EntityId::new(), 2);
+        assert_eq!(sub.inner().node_count(), 0);
+        assert_eq!(sub.inner().edge_count(), 0);
+    }
+
+    #[test]
+    fn test_all_paths_up_to_length_multiple_paths() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+        let d = EntityId::new();
+
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(b, d, RelationshipType::DonatedTo);
+        g.add_edge(a, c, RelationshipType::DonatedTo);
+        g.add_edge(c, d, RelationshipType::DonatedTo);
+
+        let paths = g.all_paths_up_to_length(a, d, 2);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&vec![a, b, d]));
+        assert!(paths.contains(&vec![a, c, d]));
+    }
+
+    #[test]
+    fn test_all_paths_up_to_length_respects_max_length() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        let c = EntityId::new();
+
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(b, c, RelationshipType::DonatedTo);
+
+        assert!(g.all_paths_up_to_length(a, c, 1).is_empty());
+        let paths = g.all_paths_up_to_length(a, c, 2);
+        assert_eq!(paths, vec![vec![a, b, c]]);
     }
 
     #[test]

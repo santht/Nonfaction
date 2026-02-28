@@ -358,6 +358,72 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    #[test]
+    fn test_bulk_delete_removes_multiple_entities() {
+        let (index, schema) = ram_index();
+        let mut indexer = EntityIndexer::new(&index, schema.clone()).unwrap();
+
+        let p1 = make_person("Bulk Delete One");
+        let p2 = make_person("Bulk Delete Two");
+        let keep = make_person("Bulk Keep Three");
+        let delete_ids = vec![p1.entity_id(), p2.entity_id()];
+
+        indexer.index_entities(&[p1, p2, keep]).unwrap();
+        indexer.commit().unwrap();
+
+        indexer.bulk_delete(&delete_ids).unwrap();
+
+        let searcher = NfSearcher::new(&index, schema).unwrap();
+        let results = searcher
+            .search("Bulk", &SearchOptions::new().with_limit(10))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].name.contains("Keep"));
+    }
+
+    #[test]
+    fn test_bulk_delete_empty_list_no_change() {
+        let (index, schema) = ram_index();
+        let mut indexer = EntityIndexer::new(&index, schema.clone()).unwrap();
+
+        let entities = vec![make_person("No Delete A"), make_person("No Delete B")];
+        indexer.index_entities(&entities).unwrap();
+        indexer.commit().unwrap();
+
+        indexer.bulk_delete(&[]).unwrap();
+
+        let searcher = NfSearcher::new(&index, schema).unwrap();
+        let results = searcher
+            .search("Delete", &SearchOptions::new().with_limit(10))
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_doc_count_after_commit() {
+        let (index, schema) = ram_index();
+        let mut indexer = EntityIndexer::new(&index, schema).unwrap();
+
+        let entities = vec![make_person("Count One"), make_person("Count Two")];
+        indexer.index_entities(&entities).unwrap();
+        indexer.commit().unwrap();
+
+        let count = indexer.doc_count().unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_doc_count_excludes_uncommitted_changes() {
+        let (index, schema) = ram_index();
+        let mut indexer = EntityIndexer::new(&index, schema).unwrap();
+
+        indexer.index_entity(&make_person("Pending Count")).unwrap();
+        assert_eq!(indexer.doc_count().unwrap(), 0);
+
+        indexer.commit().unwrap();
+        assert_eq!(indexer.doc_count().unwrap(), 1);
+    }
+
     // ─── Search tests ─────────────────────────────────────────────────────────
 
     #[test]
@@ -404,6 +470,34 @@ mod tests {
         for r in &results {
             assert!(r.score > 0.0, "score should be positive");
         }
+    }
+
+    #[test]
+    fn test_prefix_search_matches_names_with_limit() {
+        let entities = vec![
+            make_person("Alice Carter"),
+            make_person("Alina Stone"),
+            make_person("Brenda Vale"),
+        ];
+        let (index, schema) = setup(&entities);
+        let searcher = NfSearcher::new(&index, schema).unwrap();
+
+        let matches = searcher.prefix_search("ali", 2).unwrap();
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().all(|name| name.to_lowercase().starts_with("ali")));
+    }
+
+    #[test]
+    fn test_prefix_search_no_matches_or_empty_prefix() {
+        let entities = vec![make_person("Carlos West"), make_person("Dana Moore")];
+        let (index, schema) = setup(&entities);
+        let searcher = NfSearcher::new(&index, schema).unwrap();
+
+        let no_match = searcher.prefix_search("zzz", 5).unwrap();
+        assert!(no_match.is_empty());
+
+        let empty_prefix = searcher.prefix_search("", 5).unwrap();
+        assert!(empty_prefix.is_empty());
     }
 
     // ─── Faceted search tests ─────────────────────────────────────────────────

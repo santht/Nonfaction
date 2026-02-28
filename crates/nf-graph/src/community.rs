@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::Hash;
 
 use nf_core::entities::EntityId;
 use petgraph::Direction;
 use petgraph::graph::NodeIndex;
+use petgraph::visit::EdgeRef;
 
 use crate::graph::NfGraph;
 
@@ -114,6 +116,59 @@ pub fn connected_component_communities(nf_graph: &NfGraph) -> HashMap<usize, Vec
     communities
 }
 
+/// Compute directed modularity for a provided community partition.
+///
+/// Formula:
+/// `Q = (1 / m) * Σ_{i,j in same community} (A_ij - (k_out(i) * k_in(j) / m))`
+/// where `m` is the total number of directed edges.
+pub fn modularity_score<K>(nf_graph: &NfGraph, partition: &HashMap<K, Vec<EntityId>>) -> f64
+where
+    K: Eq + Hash,
+{
+    let graph = nf_graph.inner();
+    let m = graph.edge_count() as f64;
+    if m == 0.0 || partition.is_empty() {
+        return 0.0;
+    }
+
+    let mut community_by_entity: HashMap<EntityId, usize> = HashMap::new();
+    for (community_index, members) in partition.values().enumerate() {
+        for member in members {
+            community_by_entity.insert(*member, community_index);
+        }
+    }
+
+    let mut out_degree: HashMap<NodeIndex, usize> = HashMap::new();
+    let mut in_degree: HashMap<NodeIndex, usize> = HashMap::new();
+    for node in graph.node_indices() {
+        out_degree.insert(node, graph.edges_directed(node, Direction::Outgoing).count());
+        in_degree.insert(node, graph.edges_directed(node, Direction::Incoming).count());
+    }
+
+    let mut q = 0.0;
+    for edge in graph.edge_references() {
+        let source = edge.source();
+        let target = edge.target();
+        let source_id = *graph.node_weight(source).unwrap();
+        let target_id = *graph.node_weight(target).unwrap();
+
+        let same_community = match (
+            community_by_entity.get(&source_id),
+            community_by_entity.get(&target_id),
+        ) {
+            (Some(cs), Some(ct)) => cs == ct,
+            _ => false,
+        };
+
+        if same_community {
+            let expected = (out_degree[&source] as f64 * in_degree[&target] as f64) / m;
+            q += 1.0 - expected;
+        }
+    }
+
+    q / m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +262,36 @@ mod tests {
         let mut sizes: Vec<usize> = communities.values().map(|v| v.len()).collect();
         sizes.sort_unstable();
         assert_eq!(sizes, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_modularity_score_single_community_higher() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(b, a, RelationshipType::DonatedTo);
+
+        let mut partition = HashMap::new();
+        partition.insert(0u32, vec![a, b]);
+
+        let score = modularity_score(&g, &partition);
+        assert!((score - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_modularity_score_cross_community_edges() {
+        let mut g = NfGraph::new();
+        let a = EntityId::new();
+        let b = EntityId::new();
+        g.add_edge(a, b, RelationshipType::DonatedTo);
+        g.add_edge(b, a, RelationshipType::DonatedTo);
+
+        let mut partition = HashMap::new();
+        partition.insert(0u32, vec![a]);
+        partition.insert(1u32, vec![b]);
+
+        let score = modularity_score(&g, &partition);
+        assert_eq!(score, 0.0);
     }
 }

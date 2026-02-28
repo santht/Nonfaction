@@ -267,7 +267,7 @@ impl CongressScraper {
                         .as_ref()
                         .and_then(|a| a.action_date.as_deref())
                 }))
-                .unwrap_or_else(|| NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+                .unwrap_or(NaiveDate::from_ymd_opt(2024, 1, 1).expect("constant date"));
 
                 // Use first sponsor as the official; fall back to a placeholder.
                 let sponsor = bill.sponsors.as_ref().and_then(|s| s.first());
